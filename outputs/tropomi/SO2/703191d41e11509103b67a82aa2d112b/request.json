@@ -1,0 +1,65 @@
+{
+    "request": {
+        "headers": {
+            "accept": "image/tiff",
+            "content-type": "application/json"
+        },
+        "payload": {
+            "evalscript": "\n        function setup(){\n            return{\n                input: [{\n                    bands: [\"SO2\", \"dataMask\"]\n                }],\n                output: {bands: 2, sampleType: \"FLOAT32\"}\n            }\n        }\n\n        function evaluatePixel(sample){\n            if (sample.dataMask === 0) return [0, 0];\n            return [sample.SO2, 1];\n        }\n    ",
+            "input": {
+                "bounds": {
+                    "bbox": [
+                        120.868835,
+                        14.316284,
+                        121.143494,
+                        14.781522
+                    ],
+                    "properties": {
+                        "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
+                    }
+                },
+                "data": [
+                    {
+                        "dataFilter": {
+                            "timeRange": {
+                                "from": "2026-05-20T05:16:10Z",
+                                "to": "2026-05-20T05:21:10Z"
+                            }
+                        },
+                        "type": "sentinel-5p-l2"
+                    }
+                ]
+            },
+            "output": {
+                "height": 9,
+                "responses": [
+                    {
+                        "format": {
+                            "type": "image/tiff"
+                        },
+                        "identifier": "default"
+                    }
+                ],
+                "width": 5
+            }
+        },
+        "timestamp": "2026-05-21T02:39:53.193216",
+        "url": "https://sh.dataspace.copernicus.eu/api/v1/process"
+    },
+    "response": {
+        "elapsed": 1.631796,
+        "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-headers": "origin,content-type,accept,accept-crs,authorization,cache-control",
+            "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH",
+            "access-control-allow-origin": "*",
+            "access-control-max-age": "3600",
+            "content-length": "574",
+            "content-type": "image/tiff",
+            "date": "Wed, 20 May 2026 18:39:52 GMT",
+            "timing-allow-origin": "*",
+            "x-processingunits-spent": "0.006666666865348816"
+        },
+        "status_code": 200
+    }
+}
