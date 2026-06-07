@@ -32,7 +32,7 @@ OUTPUT_DIR = Path("outputs/ndvi")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 aoi_bbox = BBox(bbox=[268000, 1582000, 298000, 1634000], crs=CRS.UTM_51N)
-aoi_size = bbox_to_dimensions(aoi_bbox, resolution=25)
+aoi_size = bbox_to_dimensions(aoi_bbox, resolution=100)
 
 evalscript = """
     function setup(){
