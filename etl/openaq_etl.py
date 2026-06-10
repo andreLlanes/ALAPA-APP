@@ -59,6 +59,10 @@ MAX_PAGES_PER_CHUNK = 50
 # suspended for bursting past them). Raise via env only if you have a higher tier.
 RPM = int(os.environ.get("OPENAQ_RPM", "55"))
 RPH = int(os.environ.get("OPENAQ_RPH", "1800"))
+# Optional work-sharding: run N machines (each with its OWN OpenAQ key) over disjoint
+# subsets of locations. ETL_SHARD_COUNT=1 (default) = no split / current behaviour.
+SHARD_INDEX = int(os.environ.get("ETL_SHARD_INDEX", "0"))
+SHARD_COUNT = int(os.environ.get("ETL_SHARD_COUNT", "1"))
 
 # Region filters for OpenAQ /locations. Each region uses a server-side bbox (min_lon,
 # min_lat, max_lon, max_lat) so we only page through the metro area, not the whole country
@@ -381,6 +385,20 @@ def fetch_locations() -> list[dict]:
                 logger.warning("Country %s location fetch failed: %s", country, exc)
     logger.info("Total accepted locations: %d", len(all_locations))
     return all_locations
+
+
+def _apply_shard(locations: list[dict]) -> list[dict]:
+    """Keep only this machine's slice of locations (id %% SHARD_COUNT == SHARD_INDEX) so
+    multiple machines — each with its own OpenAQ key — can split the backfill without
+    overlapping. SHARD_COUNT <= 1 is a no-op (single-machine default)."""
+    if SHARD_COUNT <= 1:
+        return locations
+    sub = [
+        loc for loc in locations
+        if loc.get("id") is not None and int(loc["id"]) % SHARD_COUNT == SHARD_INDEX
+    ]
+    logger.info("Shard %d/%d -> %d of %d locations", SHARD_INDEX, SHARD_COUNT, len(sub), len(locations))
+    return sub
 
 
 def build_openaq_locations(locations: list[dict]) -> pd.DataFrame:
@@ -954,19 +972,23 @@ def main():
     with psycopg2.connect(dsn) as conn:
         watermarks = fetch_watermarks(conn)
 
-        locations = fetch_locations()
+        locations = _apply_shard(fetch_locations())
         openaq_locations_df = build_openaq_locations(locations)
 
         logger.info("openaq_locations_df rows: %d", len(openaq_locations_df))
-        logger.info("manila_locations rows: %d", len(manila_locations))
-        logger.info("manila_measurements rows: %d", len(manila_measurements))
 
         upsert_locations(conn, openaq_locations_df)
-        upsert_locations(conn, manila_locations)
 
         # Measurements are stream-written to DB inside build_openaq_measurements.
         build_openaq_measurements(locations, watermarks, fallback_start, end, conn)
-        upsert_measurements(conn, manila_measurements, "manila")
+
+        # Manila CSVs are local + tiny — ingest only on shard 0 to avoid redundant
+        # (idempotent) double-writes when multiple machines run.
+        if SHARD_INDEX == 0:
+            logger.info("manila_locations rows: %d, measurements rows: %d",
+                        len(manila_locations), len(manila_measurements))
+            upsert_locations(conn, manila_locations)
+            upsert_measurements(conn, manila_measurements, "manila")
 
     print("ETL complete.")
 
