@@ -47,3 +47,32 @@ CREATE INDEX idx_measurements_ts ON openaq.measurements (timestamp_utc);
 CREATE INDEX idx_measurements_loc ON openaq.measurements (location_key);
 -- Compound index for fast per-location watermark queries (MAX(timestamp_utc) GROUP BY location_key)
 CREATE INDEX idx_measurements_loc_ts ON openaq.measurements (location_key, timestamp_utc DESC);
+
+-- ---------------------------------------------------------------------------
+-- Model-ready hourly view (the "merged dataset" for transfer-learning + forecasting).
+-- One row per (sensor location, hour) with the 5 forecast features, a city label, and
+-- coordinates so the modelling step can pool Manila + Singapore + Bangkok. Export with:
+--     \copy (SELECT * FROM openaq.training_hourly ORDER BY city, location_key, timestamp_utc) TO 'merged.csv' CSV HEADER
+-- or read directly with pandas.read_sql("SELECT * FROM openaq.training_hourly", conn).
+-- ---------------------------------------------------------------------------
+CREATE VIEW openaq.training_hourly AS
+SELECT
+    m.location_key,
+    m.timestamp_utc,
+    CASE l.country_iso
+        WHEN 'PH' THEN 'Manila'
+        WHEN 'SG' THEN 'Singapore'
+        WHEN 'TH' THEN 'Bangkok'
+        ELSE COALESCE(l.locality, l.country_iso, 'unknown')
+    END                          AS city,
+    l.country_iso,
+    l.source,
+    l.latitude,
+    l.longitude,
+    m.pm25,
+    m.pm1,
+    m.pm10,
+    m.temperature_c,
+    m.humidity_pct
+FROM openaq.measurements m
+JOIN openaq.locations l USING (location_key);
