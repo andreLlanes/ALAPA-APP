@@ -41,7 +41,7 @@ DEFAULT_START_DATE = os.environ.get("METEO_START_DATE", "2021-06-30")
 DEFAULT_END_DATE = os.environ.get("METEO_END_DATE", "2026-06-30")
 LOCATIONS_CSV = os.environ.get("METEO_LOCATIONS_CSV")
 CHUNK_SIZE = int(os.environ.get("METEO_UPSERT_CHUNK_SIZE", "1000"))
-CHUNK_DAYS = int(os.environ.get("METEO_CHUNK_DAYS", "30"))
+CHUNK_DAYS = int(os.environ.get("METEO_CHUNK_DAYS", "0"))
 MAX_RETRIES = int(os.environ.get("METEO_MAX_RETRIES", "3"))
 BACKOFF_FACTOR = float(os.environ.get("METEO_BACKOFF_FACTOR", "1"))
 REQUEST_TIMEOUT = (15, 180)
@@ -119,8 +119,11 @@ def fetch_open_meteo_data(lat: float, lon: float, start_date: date, end_date: da
 def chunked_open_meteo_fetch(lat: float, lon: float, start_date: date, end_date: date, endpoint: str) -> list[pd.DataFrame]:
     frames = []
     current_start = start_date
+    total_days = (end_date - start_date).days + 1
+    effective_chunk_days = total_days if CHUNK_DAYS <= 0 else CHUNK_DAYS
+
     while current_start <= end_date:
-        current_end = min(current_start + timedelta(days=CHUNK_DAYS - 1), end_date)
+        current_end = min(current_start + timedelta(days=effective_chunk_days - 1), end_date)
         print(f"Request chunk {current_start} to {current_end} against {endpoint}")
         attempt = 0
         while attempt < MAX_RETRIES:
@@ -161,7 +164,7 @@ def fetch_open_meteo_slice(lat: float, lon: float, start_date: date, end_date: d
 
 def align_hourly_data(df: pd.DataFrame, location_key: str, start_date: date, end_date: date) -> pd.DataFrame:
     if df.empty:
-        index = pd.date_range(start=start_date, end=end_date + timedelta(days=0), freq="H", tz="UTC")
+        index = pd.date_range(start=start_date, end=end_date + timedelta(days=0), freq="h", tz="UTC")
         aligned = pd.DataFrame(index=index)
         aligned.index.name = "timestamp_utc"
         aligned = aligned.reset_index()
@@ -169,7 +172,7 @@ def align_hourly_data(df: pd.DataFrame, location_key: str, start_date: date, end
         return aligned
 
     df = df.set_index("timestamp_utc")
-    expected_index = pd.date_range(start=start_date, end=end_date + timedelta(days=0), freq="H", tz="UTC")
+    expected_index = pd.date_range(start=start_date, end=end_date + timedelta(days=0), freq="h", tz="UTC")
     df = df.reindex(expected_index)
     df.index.name = "timestamp_utc"
     df = df.reset_index()
