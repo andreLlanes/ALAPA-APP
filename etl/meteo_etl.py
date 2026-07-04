@@ -37,12 +37,23 @@ RENAMES = {
     "boundary_layer_height": "boundary_layer_height_m",
 }
 
+EXPECTED_UNITS = {
+    "temperature_2m": "°C",
+    "relative_humidity_2m": "%",
+    "wind_speed_10m": "m/s",
+    "wind_gusts_10m": "m/s",
+    "wind_direction_10m": "°",
+    "surface_pressure": "hPa",
+    "precipitation": "mm",
+    "boundary_layer_height": "m",
+}
+
 DEFAULT_START_DATE = os.environ.get("METEO_START_DATE", "2021-06-30")
 DEFAULT_END_DATE = os.environ.get("METEO_END_DATE", "2026-06-30")
 LOCATIONS_CSV = os.environ.get("METEO_LOCATIONS_CSV")
 CHUNK_SIZE = int(os.environ.get("METEO_UPSERT_CHUNK_SIZE", "1000"))
 CHUNK_DAYS = int(os.environ.get("METEO_CHUNK_DAYS", "0"))
-MAX_RETRIES = int(os.environ.get("METEO_MAX_RETRIES", "3"))
+MAX_RETRIES = int(os.environ.get("METEO_MAX_RETRIES", "20"))
 BACKOFF_FACTOR = float(os.environ.get("METEO_BACKOFF_FACTOR", "1"))
 REQUEST_TIMEOUT = (15, 180)
 
@@ -86,8 +97,27 @@ def build_request_params(lat: float, lon: float, start_date: date, end_date: dat
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "hourly": ",".join(HOURLY_VARIABLES),
-        "timezone": "GMT",
+        "timezone": "UTC",
+        "temperature_unit": "celsius",
+        "windspeed_unit": "ms",
+        "precipitation_unit": "mm",
+        "pressure_unit": "hpa",
     }
+
+
+def validate_open_meteo_units(hourly_units: dict) -> None:
+    if not hourly_units:
+        raise ValueError("Open-Meteo response missing hourly units metadata.")
+
+    mismatches = []
+    for variable, expected in EXPECTED_UNITS.items():
+        actual = hourly_units.get(variable)
+        if actual != expected:
+            mismatches.append(f"{variable}: expected {expected}, got {actual}")
+
+    if mismatches:
+        details = "; ".join(mismatches)
+        raise ValueError(f"Open-Meteo returned unexpected units: {details}")
 
 
 def fetch_open_meteo_data(lat: float, lon: float, start_date: date, end_date: date) -> pd.DataFrame:
@@ -149,6 +179,7 @@ def fetch_open_meteo_slice(lat: float, lon: float, start_date: date, end_date: d
     if "hourly" not in data:
         return pd.DataFrame()
 
+    validate_open_meteo_units(data.get("hourly_units", {}))
     df = pd.DataFrame(data["hourly"])
     if df.empty:
         return df
