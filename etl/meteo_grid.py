@@ -1,20 +1,31 @@
 import os
 import time
 from datetime import date, timedelta
+import requests
 
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
-
-import meteo_etl as meteo_etl_mod
-
 load_dotenv()
 
 DEFAULT_START_DATE = os.environ.get("METEO_START_DATE", "2021-06-30")
 DEFAULT_END_DATE = os.environ.get("METEO_END_DATE", "2026-06-30")
 GRID_STEP_DEG = float(os.environ.get("METEO_GRID_STEP_DEG", "0.25"))
 CHUNK_SIZE = int(os.environ.get("METEO_UPSERT_CHUNK_SIZE", "1000"))
+DEFAULT_START_DATE = os.environ.get("METEO_START_DATE", "2021-06-30")
+DEFAULT_END_DATE = os.environ.get("METEO_END_DATE", "2026-06-30")
+LOCATIONS_CSV = os.environ.get("METEO_LOCATIONS_CSV")
+CHUNK_SIZE = int(os.environ.get("METEO_UPSERT_CHUNK_SIZE", "1000"))
+CHUNK_DAYS = int(os.environ.get("METEO_CHUNK_DAYS", "0"))
+MAX_RETRIES = int(os.environ.get("METEO_MAX_RETRIES", "20"))
+BACKOFF_FACTOR = float(os.environ.get("METEO_BACKOFF_FACTOR", "1"))
+REQUEST_TIMEOUT = (15, 180)
+
+ARCHIVE_API_BASE = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_API_BASE = "https://api.open-meteo.com/v1/forecast"
 
 CITY_BBOXES = {
     "Metro Manila": (14.316284, 120.868835, 14.781522, 121.143494),
@@ -33,6 +44,67 @@ METEO_COLUMNS = [
     "boundary_layer_height_m",
 ]
 
+RENAMES = {
+    "temperature_2m": "temperature_c",
+    "relative_humidity_2m": "humidity_pct",
+    "wind_speed_10m": "wind_speed_ms",
+    "wind_gusts_10m": "wind_gusts_ms",
+    "wind_direction_10m": "wind_dir_deg",
+    "surface_pressure": "surface_pressure_hpa",
+    "precipitation": "precipitation_mm",
+    "boundary_layer_height": "boundary_layer_height_m",
+}
+
+HOURLY_VARIABLES = [
+    "temperature_2m",
+    "relative_humidity_2m",
+    "wind_speed_10m",
+    "wind_gusts_10m",
+    "wind_direction_10m",
+    "surface_pressure",
+    "precipitation",
+    "boundary_layer_height",
+]
+
+EXPECTED_UNITS = {
+    "temperature_2m": "°C",
+    "relative_humidity_2m": "%",
+    "wind_speed_10m": "m/s",
+    "wind_gusts_10m": "m/s",
+    "wind_direction_10m": "°",
+    "surface_pressure": "hPa",
+    "precipitation": "mm",
+    "boundary_layer_height": "m",
+}
+
+retry_strategy = Retry(
+    total=MAX_RETRIES,
+    backoff_factor=BACKOFF_FACTOR,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["HEAD", "GET", "OPTIONS"],
+    raise_on_status=False,
+)
+
+SESSION = requests.Session()
+adapter = HTTPAdapter(max_retries=retry_strategy)
+SESSION.mount("https://", adapter)
+SESSION.mount("http://", adapter)
+
+
+
+def build_request_params(lat: float, lon: float, start_date: date, end_date: date) -> dict:
+    return {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "hourly": ",".join(HOURLY_VARIABLES),
+        "timezone": "UTC",
+        "temperature_unit": "celsius",
+        "windspeed_unit": "ms",
+        "precipitation_unit": "mm",
+        "pressure_unit": "hpa",
+    }
 
 def resolve_pg_dsn() -> str:
     dsn = os.environ.get("PG_DSN")
@@ -48,6 +120,21 @@ def resolve_pg_dsn() -> str:
         raise ValueError("Missing PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD env vars.")
     return f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
 
+def validate_open_meteo_units(hourly_units: dict) -> None:
+    if not hourly_units:
+        raise ValueError("Open-Meteo response missing hourly units metadata.")
+
+    mismatches = []
+    for variable, expected in EXPECTED_UNITS.items():
+        actual = hourly_units.get(variable)
+        if actual != expected:
+            mismatches.append(f"{variable}: expected {expected}, got {actual}")
+
+    if mismatches:
+        details = "; ".join(mismatches)
+        raise ValueError(f"Open-Meteo returned unexpected units: {details}")
+
+
 
 def generate_grid_centers(bbox: tuple[float, float, float, float]) -> list[tuple[float, float]]:
     min_lat, min_lon, max_lat, max_lon = bbox
@@ -62,12 +149,85 @@ def generate_grid_centers(bbox: tuple[float, float, float, float]) -> list[tuple
     return centers
 
 
+def fetch_open_meteo_data(lat: float, lon: float, start_date: date, end_date: date) -> pd.DataFrame:
+    today = date.today()
+    frames = []
+
+    if end_date < start_date:
+        return pd.DataFrame()
+
+    if start_date <= today and end_date > today:
+        historical_end = min(today, end_date)
+        forecast_start = today + timedelta(days=1)
+        frames.extend(chunked_open_meteo_fetch(lat, lon, start_date, historical_end, ARCHIVE_API_BASE))
+        if end_date >= forecast_start:
+            frames.extend(chunked_open_meteo_fetch(lat, lon, forecast_start, end_date, FORECAST_API_BASE))
+    elif end_date <= today:
+        frames.extend(chunked_open_meteo_fetch(lat, lon, start_date, end_date, ARCHIVE_API_BASE))
+    else:
+        frames.extend(chunked_open_meteo_fetch(lat, lon, start_date, end_date, FORECAST_API_BASE))
+
+    if not frames:
+        return pd.DataFrame()
+
+    df = pd.concat(frames, ignore_index=True)
+    df = df.loc[:, ~df.columns.duplicated()]
+    return df
+
+def chunked_open_meteo_fetch(lat: float, lon: float, start_date: date, end_date: date, endpoint: str) -> list[pd.DataFrame]:
+    frames = []
+    current_start = start_date
+    total_days = (end_date - start_date).days + 1
+    effective_chunk_days = total_days if CHUNK_DAYS <= 0 else CHUNK_DAYS
+
+    while current_start <= end_date:
+        current_end = min(current_start + timedelta(days=effective_chunk_days - 1), end_date)
+        print(f"Request chunk {current_start} to {current_end} against {endpoint}")
+        attempt = 0
+        while attempt < MAX_RETRIES:
+            try:
+                frames.append(fetch_open_meteo_slice(lat, lon, current_start, current_end, endpoint))
+                break
+            except requests.exceptions.RequestException as exc:
+                attempt += 1
+                wait = 2 ** attempt
+                print(f"Open-Meteo request failed (attempt {attempt}/{MAX_RETRIES}) for {current_start}-{current_end}: {exc}")
+                if attempt >= MAX_RETRIES:
+                    raise
+                time.sleep(wait)
+        current_start = current_end + timedelta(days=1)
+    return frames
+
+
+def fetch_open_meteo_slice(lat: float, lon: float, start_date: date, end_date: date, endpoint: str) -> pd.DataFrame:
+    params = build_request_params(lat, lon, start_date, end_date)
+    response = SESSION.get(endpoint, params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    if "hourly" not in data:
+        return pd.DataFrame()
+
+    validate_open_meteo_units(data.get("hourly_units", {}))
+    df = pd.DataFrame(data["hourly"])
+    if df.empty:
+        return df
+
+    df = df.rename(columns=RENAMES)
+    df = df.rename(columns={"time": "timestamp_utc"}) if "time" in df.columns else df
+    if "timestamp_utc" not in df.columns:
+        return pd.DataFrame()
+
+    df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df["latitude"] = lat
+    df["longitude"] = lon
+    return df
+
 def fetch_weather_for_grid_cell(city: str, lat: float, lon: float, start_date: date, end_date: date) -> pd.DataFrame:
-    raw_df = meteo_etl_mod.fetch_open_meteo_data(lat, lon, start_date, end_date)
+    raw_df = fetch_open_meteo_data(lat, lon, start_date, end_date)
     if raw_df.empty:
         return pd.DataFrame()
 
-    df = raw_df.rename(columns=meteo_etl_mod.RENAMES)
+    df = raw_df.rename(columns=RENAMES)
     if "time" in df.columns:
         df = df.rename(columns={"time": "timestamp_utc"})
     if "timestamp_utc" not in df.columns:
