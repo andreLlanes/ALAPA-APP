@@ -5,6 +5,7 @@ import time
 import json
 import tempfile
 import requests
+import boto3
 import numpy as np
 import rasterio
 from rasterio.warp import transform_geom
@@ -23,6 +24,9 @@ LAADS_BASE = "https://ladsweb.modaps.eosdis.nasa.gov"
 PRODUCT = "MCD19A2"
 COLLECTION = "61"
 TILE = "h29v07"
+
+S3_BUCKET = os.environ["S3_BUCKET"]
+S3_PREFIX = "modis"
 
 OUTPUT_DIR = Path("outputs/modis")
 STATE_FILE = Path("outputs/modis/.downloaded.json")
@@ -104,6 +108,13 @@ def trim_to_valid_data(clipped: dict[str, np.ndarray], transform):
         transform.f + col_min * transform.d + row_min * transform.e,
     )
     return trimmed, trimmed_transform
+
+
+def upload_to_s3(local_path: Path):
+    s3 = boto3.client("s3")
+    key = f"{S3_PREFIX}/{local_path.name}"
+    s3.upload_file(str(local_path), S3_BUCKET, key)
+    logger.info(f"Uploaded to s3://{S3_BUCKET}/{key}")
 
 
 # LAADS Download
@@ -287,14 +298,16 @@ def process_granule(hdf_path: Path, target_date: date):
     valid = int(np.sum(~np.isnan(clipped["AOD_047"])))
     logger.info(f"Saved: {out_path.name}  shape=({clip_h},{clip_w})  valid_AOD047={valid}")
 
+    upload_to_s3(out_path)
 
-def run_daily():
-    logger.info("=== MODIS daily collection start ===")
+
+def run_daily(days: int = 7):
+    logger.info(f"=== MODIS daily collection start (lookback {days} day(s)) ===")
     state = load_state()
     downloaded = state.get("downloaded", [])
     total = 0
 
-    for days_back in range(7):
+    for days_back in range(days):
         check_date = date.today() - timedelta(days=days_back)
         try:
             granules = list_granules(check_date)
@@ -333,12 +346,13 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["scheduler", "now"], default="scheduler")
+    parser.add_argument("--days", type=int, default=7, help="How many days back to check")
     args = parser.parse_args()
 
     if args.mode == "now":
-        run_daily()
+        run_daily(args.days)
     else:
-        schedule.every().day.at("10:00").do(run_daily)
+        schedule.every().day.at("10:00").do(run_daily, days=args.days)
         logger.info("Scheduler running - MODIS collection daily at 10:00 UTC")
         while True:
             schedule.run_pending()
