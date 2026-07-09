@@ -1,4 +1,3 @@
-
 import os
 import time
 from datetime import datetime, date, timedelta
@@ -190,6 +189,8 @@ def fetch_open_meteo_slice(lat: float, lon: float, start_date: date, end_date: d
         return pd.DataFrame()
 
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
+    df["latitude"] = lat
+    df["longitude"] = lon
     return df
 
 
@@ -285,8 +286,8 @@ def main() -> None:
     records = []
     for _, row in locations_df.iterrows():
         station = row["location_key"]
-        lat = float(row["latitude"])
-        lon = float(row["longitude"])
+        lat = float(row.get("latitude"))
+        lon = float(row.get("longitude"))
         print(f"Fetching {station} {lat},{lon} from {start_date} to {end_date}")
         hourly_df = fetch_open_meteo_data(lat, lon, start_date, end_date)
         hourly_df = align_hourly_data(hourly_df, station, start_date, end_date)
