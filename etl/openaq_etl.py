@@ -16,9 +16,11 @@ Performance model (why a first 5-year backfill is slow and how we cope):
       - skipping sensors whose parameter we don't model.
 
 Tunable via environment variables (all optional):
-    OPENAQ_LOOKBACK_DAYS  default 730 (2 years) — fallback start when no watermark
-    OPENAQ_RPM            default 55   — requests/minute budget (headroom under the 60 cap)
-    OPENAQ_RPH            default 1800 — requests/hour budget (headroom under the 2000 cap)
+    OPENAQ_START_DATE     default 2021-06-30 — backfill window start (used when no watermark)
+    OPENAQ_END_DATE       default 2026-06-30 — backfill window end (aligns with the meteo ETLs)
+    OPENAQ_IGNORE_WATERMARKS default 0 — set 1 to re-pull full history (ignore stored watermarks)
+    OPENAQ_RPM            default 45   — requests/minute budget (headroom under the 60 cap)
+    OPENAQ_RPH            default 1500 — requests/hour budget (headroom under the 2000 cap)
     OPENAQ_MAX_WORKERS    default 5    — concurrent fetch threads
     OPENAQ_CHUNK_DAYS     default 90   — measurement date-range chunk size
 """
@@ -45,7 +47,16 @@ API_BASE = "https://api.openaq.org/v3"
 API_KEY = os.environ.get("OPENAQ_API_KEY")
 
 # --- Tunables (env-overridable) --------------------------------------------
-LOOKBACK_DAYS = int(os.environ.get("OPENAQ_LOOKBACK_DAYS", "730"))  # 2 years
+# Fixed 5-year backfill window for the study (June 30 2021 -> June 30 2026), aligning the
+# air-quality history with the meteo ETLs (meteo_etl.py / meteo_grid.py).
+START_DATE = os.environ.get("OPENAQ_START_DATE", "2021-06-30")
+END_DATE = os.environ.get("OPENAQ_END_DATE", "2026-06-30")
+# Watermarks normally make runs incremental (only fetch newer-than-stored). That BLOCKS a
+# historical backfill: a location already holding recent rows would never re-fetch older
+# history. Set OPENAQ_IGNORE_WATERMARKS=1 to ignore watermarks and re-pull the full window
+# from START_DATE (clamped per-sensor to datetimeFirst). Upserts are idempotent, so this
+# re-fetches overlapping data harmlessly rather than duplicating it.
+IGNORE_WATERMARKS = os.environ.get("OPENAQ_IGNORE_WATERMARKS", "0") == "1"
 MAX_WORKERS = int(os.environ.get("OPENAQ_MAX_WORKERS", "5"))
 CHUNK_DAYS = int(os.environ.get("OPENAQ_CHUNK_DAYS", "365"))
 # Use the hourly-AGGREGATE series (/hours), NOT raw /measurements. High-frequency sensors
@@ -57,8 +68,8 @@ SENSOR_SERIES_PATH = os.environ.get("OPENAQ_SERIES_PATH", "hours")
 MAX_PAGES_PER_CHUNK = 50
 # Defaults sit under the 60/min & 2000/hr hard caps for safety (the prior account was
 # suspended for bursting past them). Raise via env only if you have a higher tier.
-RPM = int(os.environ.get("OPENAQ_RPM", "55"))
-RPH = int(os.environ.get("OPENAQ_RPH", "1800"))
+RPM = int(os.environ.get("OPENAQ_RPM", "45"))
+RPH = int(os.environ.get("OPENAQ_RPH", "1500"))
 # Optional work-sharding: run N machines (each with its OWN OpenAQ key) over disjoint
 # subsets of locations. ETL_SHARD_COUNT=1 (default) = no split / current behaviour.
 SHARD_INDEX = int(os.environ.get("ETL_SHARD_INDEX", "0"))
@@ -88,19 +99,19 @@ COUNTRY_FILTERS = {
 }
 
 # OpenAQ parameter name (lowercased) -> our DB column.
+# Scope: this study only needs PM2.5, PM10, temperature and humidity from the ground
+# sensors. Sensors whose parameter is NOT listed here are skipped at job-build time
+# (see build_openaq_measurements), so dropping pm1/co2/tvoc also cuts request volume.
 # NOTE: OpenAQ calls relative humidity "relativehumidity", NOT "humidity" — the old
 # map silently dropped every humidity reading. We keep aliases for safety.
 PARAMETER_MAP = {
     "pm25": "pm25",
     "pm10": "pm10",
-    "pm1": "pm1",
     "temperature": "temperature_c",
     "temp": "temperature_c",
     "relativehumidity": "humidity_pct",
     "humidity": "humidity_pct",
     "rh": "humidity_pct",
-    "co2": "co2",
-    "tvoc": "tvoc",
 }
 
 # Columns the wide measurements frame must always expose (DB columns).
@@ -957,11 +968,11 @@ def main():
     dsn = resolve_pg_dsn()
     manila_dir = Path(os.environ.get("MANILA_DIR", "data/manila"))
 
-    fallback_start = datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    end = datetime.now(timezone.utc)
+    fallback_start = datetime.fromisoformat(START_DATE).replace(tzinfo=timezone.utc)
+    end = datetime.fromisoformat(END_DATE).replace(tzinfo=timezone.utc)
     logger.info(
-        "Lookback %d days (from %s), rate budget %d/min & %d/hr, %d workers.",
-        LOOKBACK_DAYS, fallback_start.date(), RPM, RPH, MAX_WORKERS,
+        "Backfill window %s -> %s, rate budget %d/min & %d/hr, %d workers.",
+        fallback_start.date(), end.date(), RPM, RPH, MAX_WORKERS,
     )
 
     session = get_session()
@@ -970,7 +981,11 @@ def main():
     manila_measurements, manila_locations = load_manila(manila_dir)
 
     with psycopg2.connect(dsn) as conn:
-        watermarks = fetch_watermarks(conn)
+        if IGNORE_WATERMARKS:
+            logger.info("OPENAQ_IGNORE_WATERMARKS=1 — ignoring watermarks; full backfill from %s.", START_DATE)
+            watermarks = {}
+        else:
+            watermarks = fetch_watermarks(conn)
 
         locations = _apply_shard(fetch_locations())
         openaq_locations_df = build_openaq_locations(locations)
