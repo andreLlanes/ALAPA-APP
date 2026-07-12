@@ -25,16 +25,13 @@ import psycopg2.extras
 # Config
 # ---------------------------------------------------------------------------
 
-PARAMS = ["pm1", "pm25", "pm10", "temperature_c", "humidity_pct", "co2", "tvoc"]
+PARAMS = ["pm25", "pm10", "temperature_c", "humidity_pct"]
 
 BOUNDS: dict[str, tuple[float, float]] = {
-    "pm1":          (0,    500),
     "pm25":         (0,    500),
     "pm10":         (0,    500),
     "temperature_c":(-10,   60),
     "humidity_pct": (0,    100),
-    "co2":          (300, 5000),
-    "tvoc":         (0,  5000),
 }
 
 FLATLINE_MAX_RUN = 3   # ≥3 identical consecutive hourly values → NULL
@@ -133,7 +130,7 @@ def fetch_locations(conn) -> list[str]:
 def fetch_raw(conn, location_key: str) -> pd.DataFrame:
     query = """
         SELECT location_key, timestamp_utc,
-               pm1, pm25, pm10, temperature_c, humidity_pct, co2, tvoc
+               pm25, pm10, temperature_c, humidity_pct
         FROM   openaq.measurements
         WHERE  location_key = %s
         ORDER  BY timestamp_utc ASC
@@ -153,55 +150,30 @@ def upsert_clean(conn, df: pd.DataFrame) -> None:
         (
             row.location_key,
             row.timestamp_utc,
-            _na_to_none(getattr(row, "pm1", None)),
             _na_to_none(getattr(row, "pm25", None)),
             _na_to_none(getattr(row, "pm10", None)),
             _na_to_none(getattr(row, "temperature_c", None)),
             _na_to_none(getattr(row, "humidity_pct", None)),
-            _na_to_none(getattr(row, "co2", None)),
-            _na_to_none(getattr(row, "tvoc", None)),
         )
         for row in df.itertuples(index=False)
     ]
 
+    # inserted_at is omitted here so the table default (now()) applies on insert.
     query = """
         INSERT INTO openaq.measurements_clean
             (location_key, timestamp_utc,
-             pm1, pm25, pm10, temperature_c, humidity_pct, co2, tvoc,
-             inserted_at)
+             pm25, pm10, temperature_c, humidity_pct)
         VALUES %s
         ON CONFLICT (location_key, timestamp_utc) DO UPDATE SET
-            pm1           = EXCLUDED.pm1,
             pm25          = EXCLUDED.pm25,
             pm10          = EXCLUDED.pm10,
             temperature_c = EXCLUDED.temperature_c,
             humidity_pct  = EXCLUDED.humidity_pct,
-            co2           = EXCLUDED.co2,
-            tvoc          = EXCLUDED.tvoc,
-            inserted_at   = now()
-    """
-    # Append inserted_at=DEFAULT placeholder per row
-    rows_with_ts = [r + (psycopg2.extensions.AsIs("DEFAULT"),) for r in values]
-
-    # Use a simpler approach: omit inserted_at from VALUES (use table default)
-    query_no_ts = """
-        INSERT INTO openaq.measurements_clean
-            (location_key, timestamp_utc,
-             pm1, pm25, pm10, temperature_c, humidity_pct, co2, tvoc)
-        VALUES %s
-        ON CONFLICT (location_key, timestamp_utc) DO UPDATE SET
-            pm1           = EXCLUDED.pm1,
-            pm25          = EXCLUDED.pm25,
-            pm10          = EXCLUDED.pm10,
-            temperature_c = EXCLUDED.temperature_c,
-            humidity_pct  = EXCLUDED.humidity_pct,
-            co2           = EXCLUDED.co2,
-            tvoc          = EXCLUDED.tvoc,
             inserted_at   = now()
     """
     try:
         with conn.cursor() as cur:
-            psycopg2.extras.execute_values(cur, query_no_ts, values, page_size=1000)
+            psycopg2.extras.execute_values(cur, query, values, page_size=1000)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -288,29 +260,36 @@ def clean_location(conn, location_key: str) -> LocationStats:
 
 
 _SCHEMA_SQL = """
+-- Drop the dependent view first so the stale co2 / tvoc columns can be removed
+-- (CREATE OR REPLACE VIEW cannot drop columns, and DROP COLUMN would fail while
+-- the view still references them).
+DROP VIEW IF EXISTS openaq.training_clean;
+
 CREATE TABLE IF NOT EXISTS openaq.measurements_clean (
     location_key   text             NOT NULL REFERENCES openaq.locations(location_key),
     timestamp_utc  timestamptz      NOT NULL,
-    pm1            double precision,
     pm25           double precision,
     pm10           double precision,
     temperature_c  double precision,
     humidity_pct   double precision,
-    co2            double precision,
-    tvoc           double precision,
     inserted_at    timestamptz      NOT NULL DEFAULT now(),
     UNIQUE (location_key, timestamp_utc)
 );
 
+-- Migrate tables created before pm1 / co2 / tvoc were dropped from scope.
+ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS pm1;
+ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS co2;
+ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS tvoc;
+
 CREATE INDEX IF NOT EXISTS idx_measurements_clean_loc_ts
     ON openaq.measurements_clean (location_key, timestamp_utc DESC);
 
-CREATE OR REPLACE VIEW openaq.training_clean AS
+CREATE VIEW openaq.training_clean AS
 SELECT
     mc.location_key,
     mc.timestamp_utc,
-    mc.pm1, mc.pm25, mc.pm10,
-    mc.temperature_c, mc.humidity_pct, mc.co2, mc.tvoc,
+    mc.pm25, mc.pm10,
+    mc.temperature_c, mc.humidity_pct,
     CASE l.country_iso
         WHEN 'PH' THEN 'Manila'
         WHEN 'SG' THEN 'Singapore'
