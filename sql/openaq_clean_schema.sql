@@ -34,7 +34,6 @@ SELECT
     mc.tvoc,
     CASE l.country_iso
         WHEN 'PH' THEN 'Manila'
-        WHEN 'SG' THEN 'Singapore'
         WHEN 'TH' THEN 'Bangkok'
     END                                                    AS city,
     l.country_iso,
@@ -44,14 +43,12 @@ SELECT
     EXTRACT(hour FROM mc.timestamp_utc AT TIME ZONE
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
-            WHEN 'SG' THEN 'Asia/Singapore'
             WHEN 'TH' THEN 'Asia/Bangkok'
         END
     )::int                                                 AS local_hour,
     EXTRACT(dow FROM mc.timestamp_utc AT TIME ZONE
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
-            WHEN 'SG' THEN 'Asia/Singapore'
             WHEN 'TH' THEN 'Asia/Bangkok'
         END
     )::int                                                 AS day_of_week

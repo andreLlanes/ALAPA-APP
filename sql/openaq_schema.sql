@@ -51,7 +51,7 @@ CREATE INDEX idx_measurements_loc_ts ON openaq.measurements (location_key, times
 -- ---------------------------------------------------------------------------
 -- Model-ready hourly view (the "merged dataset" for transfer-learning + forecasting).
 -- One row per (sensor location, hour) with the 5 forecast features, a city label, and
--- coordinates so the modelling step can pool Manila + Singapore + Bangkok. Export with:
+-- coordinates so the modelling step can pool Manila + Bangkok. Export with:
 --     \copy (SELECT * FROM openaq.training_hourly ORDER BY city, location_key, timestamp_utc) TO 'merged.csv' CSV HEADER
 -- or read directly with pandas.read_sql("SELECT * FROM openaq.training_hourly", conn).
 -- ---------------------------------------------------------------------------
@@ -61,7 +61,6 @@ SELECT
     m.timestamp_utc,
     CASE l.country_iso
         WHEN 'PH' THEN 'Manila'
-        WHEN 'SG' THEN 'Singapore'
         WHEN 'TH' THEN 'Bangkok'
         ELSE COALESCE(l.locality, l.country_iso, 'unknown')
     END                          AS city,

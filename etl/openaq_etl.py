@@ -1,8 +1,8 @@
 """OpenAQ -> PostgreSQL ETL for the ALAPA air-quality thesis.
 
-Pulls AirGradient/air4thai sensor measurements from Bangkok (TH) and Singapore (SG)
-via the OpenAQ v3 API for transfer learning, plus optional Manila AirGradient CSVs,
-and upserts them into the `openaq` schema.
+Pulls AirGradient/air4thai sensor measurements from Bangkok (TH) via the OpenAQ v3
+API for transfer learning, plus optional Manila AirGradient CSVs, and upserts them
+into the `openaq` schema.
 
 Performance model (why a first 5-year backfill is slow and how we cope):
     OpenAQ rate limits a registered key to 60 req/min AND 2,000 req/hour. The wall
@@ -78,14 +78,9 @@ SHARD_COUNT = int(os.environ.get("ETL_SHARD_COUNT", "1"))
 # Region filters for OpenAQ /locations. Each region uses a server-side bbox (min_lon,
 # min_lat, max_lon, max_lat) so we only page through the metro area, not the whole country
 # — far fewer requests per run. isMonitor is deliberately NOT used: the low-cost AirGradient
-# (SG/TH/Manila) and Clarity (Manila) sensors central to this study are isMonitor=false, so
+# (TH/Manila) and Clarity (Manila) sensors central to this study are isMonitor=false, so
 # filtering isMonitor=true would exclude exactly what we want.
 COUNTRY_FILTERS = {
-    # Singapore (island-wide) — AirGradient network.
-    "SG": {
-        "bbox": (103.55, 1.13, 104.10, 1.50),
-        "providers": {"airgradient"},
-    },
     # Bangkok metropolitan region — AirGradient + air4thai.
     "TH": {
         "bbox": (100.25, 13.40, 101.00, 14.10),
@@ -653,7 +648,7 @@ def build_openaq_measurements(
 
     # Process not-yet-ingested locations (no watermark — e.g. Bangkok) FIRST. This sends the
     # run's budget to the outstanding work before any re-suspension; already-complete
-    # locations (SG/PH) only get a quick "anything new?" check, and that happens last.
+    # locations (PH) only get a quick "anything new?" check, and that happens last.
     jobs.sort(key=lambda j: f"openaq:{j[2]}" in watermarks)
 
     logger.info("Submitting %d sensor fetch jobs (max_workers=%d).", len(jobs), max_workers)

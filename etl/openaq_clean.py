@@ -122,8 +122,17 @@ def apply_flatlines(df: pd.DataFrame) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 def fetch_locations(conn) -> list[str]:
+    """Location keys to clean. Singapore is out of scope for this study, so SG locations
+    are excluded here — openaq.locations may still hold them from earlier runs, and
+    without this filter a re-run would re-populate measurements_clean with SG rows."""
+    query = """
+        SELECT location_key
+        FROM   openaq.locations
+        WHERE  country_iso IS DISTINCT FROM 'SG'
+        ORDER  BY location_key
+    """
     with conn.cursor() as cur:
-        cur.execute("SELECT location_key FROM openaq.locations ORDER BY location_key")
+        cur.execute(query)
         return [row[0] for row in cur.fetchall()]
 
 
@@ -292,7 +301,6 @@ SELECT
     mc.temperature_c, mc.humidity_pct,
     CASE l.country_iso
         WHEN 'PH' THEN 'Manila'
-        WHEN 'SG' THEN 'Singapore'
         WHEN 'TH' THEN 'Bangkok'
     END                                                    AS city,
     l.country_iso,
@@ -302,14 +310,12 @@ SELECT
     EXTRACT(hour FROM mc.timestamp_utc AT TIME ZONE
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
-            WHEN 'SG' THEN 'Asia/Singapore'
             WHEN 'TH' THEN 'Asia/Bangkok'
         END
     )::int                                                 AS local_hour,
     EXTRACT(dow FROM mc.timestamp_utc AT TIME ZONE
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
-            WHEN 'SG' THEN 'Asia/Singapore'
             WHEN 'TH' THEN 'Asia/Bangkok'
         END
     )::int                                                 AS day_of_week
