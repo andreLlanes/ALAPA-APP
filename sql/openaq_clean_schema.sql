@@ -15,6 +15,18 @@ CREATE TABLE IF NOT EXISTS openaq.measurements_clean (
     UNIQUE (location_key, timestamp_utc)
 );
 
+-- Upgrade an older measurements_clean table in place. CREATE TABLE IF NOT EXISTS
+-- does not add columns when the table already exists.
+ALTER TABLE openaq.measurements_clean
+    ADD COLUMN IF NOT EXISTS pm1           double precision,
+    ADD COLUMN IF NOT EXISTS pm25          double precision,
+    ADD COLUMN IF NOT EXISTS pm10          double precision,
+    ADD COLUMN IF NOT EXISTS temperature_c double precision,
+    ADD COLUMN IF NOT EXISTS humidity_pct  double precision,
+    ADD COLUMN IF NOT EXISTS co2           double precision,
+    ADD COLUMN IF NOT EXISTS tvoc          double precision,
+    ADD COLUMN IF NOT EXISTS inserted_at   timestamptz NOT NULL DEFAULT now();
+
 CREATE INDEX IF NOT EXISTS idx_measurements_clean_loc_ts
     ON openaq.measurements_clean (location_key, timestamp_utc DESC);
 

@@ -20,6 +20,9 @@ import numpy as np
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -269,26 +272,33 @@ def clean_location(conn, location_key: str) -> LocationStats:
 
 
 _SCHEMA_SQL = """
--- Drop the dependent view first so the stale co2 / tvoc columns can be removed
--- (CREATE OR REPLACE VIEW cannot drop columns, and DROP COLUMN would fail while
--- the view still references them).
+-- Recreate the model-ready view after ensuring the table has the shared columns.
 DROP VIEW IF EXISTS openaq.training_clean;
 
 CREATE TABLE IF NOT EXISTS openaq.measurements_clean (
     location_key   text             NOT NULL REFERENCES openaq.locations(location_key),
     timestamp_utc  timestamptz      NOT NULL,
+    pm1            double precision,
     pm25           double precision,
     pm10           double precision,
     temperature_c  double precision,
     humidity_pct   double precision,
+    co2            double precision,
+    tvoc           double precision,
     inserted_at    timestamptz      NOT NULL DEFAULT now(),
     UNIQUE (location_key, timestamp_utc)
 );
 
--- Migrate tables created before pm1 / co2 / tvoc were dropped from scope.
-ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS pm1;
-ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS co2;
-ALTER TABLE openaq.measurements_clean DROP COLUMN IF EXISTS tvoc;
+-- Upgrade older tables without removing columns used by the LA-inclusive schema.
+ALTER TABLE openaq.measurements_clean
+    ADD COLUMN IF NOT EXISTS pm1           double precision,
+    ADD COLUMN IF NOT EXISTS pm25          double precision,
+    ADD COLUMN IF NOT EXISTS pm10          double precision,
+    ADD COLUMN IF NOT EXISTS temperature_c double precision,
+    ADD COLUMN IF NOT EXISTS humidity_pct  double precision,
+    ADD COLUMN IF NOT EXISTS co2           double precision,
+    ADD COLUMN IF NOT EXISTS tvoc          double precision,
+    ADD COLUMN IF NOT EXISTS inserted_at   timestamptz NOT NULL DEFAULT now();
 
 CREATE INDEX IF NOT EXISTS idx_measurements_clean_loc_ts
     ON openaq.measurements_clean (location_key, timestamp_utc DESC);
@@ -297,11 +307,14 @@ CREATE VIEW openaq.training_clean AS
 SELECT
     mc.location_key,
     mc.timestamp_utc,
+    mc.pm1,
     mc.pm25, mc.pm10,
     mc.temperature_c, mc.humidity_pct,
+    mc.co2, mc.tvoc,
     CASE l.country_iso
         WHEN 'PH' THEN 'Manila'
         WHEN 'TH' THEN 'Bangkok'
+        WHEN 'US' THEN 'Los Angeles'
     END                                                    AS city,
     l.country_iso,
     l.source,
@@ -311,12 +324,14 @@ SELECT
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
             WHEN 'TH' THEN 'Asia/Bangkok'
+            WHEN 'US' THEN 'America/Los_Angeles'
         END
     )::int                                                 AS local_hour,
     EXTRACT(dow FROM mc.timestamp_utc AT TIME ZONE
         CASE l.country_iso
             WHEN 'PH' THEN 'Asia/Manila'
             WHEN 'TH' THEN 'Asia/Bangkok'
+            WHEN 'US' THEN 'America/Los_Angeles'
         END
     )::int                                                 AS day_of_week
 FROM openaq.measurements_clean mc

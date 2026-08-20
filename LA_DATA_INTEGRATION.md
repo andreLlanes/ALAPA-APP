@@ -21,6 +21,24 @@ First, create the new `measurements_withLA` table and views:
 psql $PG_DSN -f sql/openaq_clean_schema.sql
 ```
 
+On Windows `cmd.exe`, `.env` is not loaded automatically and `$PG_DSN` is not valid
+`cmd.exe` syntax. Set the PostgreSQL connection variables first, then run the schema:
+
+```cmd
+set "PGHOST=<your_credentials>"
+set "PGPORT=<your_credentials>"
+set "PGDATABASE=<your_credentials>"
+set "PGUSER=<your_credentials>"
+set "PGPASSWORD=<your_credentials>"
+psql -f sql\openaq_clean_schema.sql
+```
+
+Alternatively, provide the connection details directly and enter `1234` when prompted:
+
+```cmd
+psql -h 3.1.66.246 -p 5432 -U alapa_writer -d alapa -f sql\openaq_clean_schema.sql
+```
+
 This command creates:
 
 - `openaq.measurements_withLA` - Table for all measurements including LA
