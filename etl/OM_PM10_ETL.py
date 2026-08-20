@@ -23,7 +23,10 @@ DOMAIN = os.environ.get("METEO_AQ_DOMAIN", "cams_global")
 HOURLY_VARIABLES = ["pm10"]
 SOURCE = "open-meteo"
 
-
+# BBox definitions for different regions (min_lat, min_lon, max_lat, max_lon):
+#   Manila:       "14.316284,120.868835,14.781522,121.143494"
+#   Bangkok:      "13.600000,100.400000,13.950000,100.850000"
+#   Los Angeles:  "33.800000,-118.500000,34.300000,-117.900000"
 BBOX = os.environ.get("METEO_BBOX", "14.316284,120.868835,14.781522,121.143494")
 BBOX_PAD_DEG = float(os.environ.get("METEO_BBOX_PAD_DEG", "0.4"))
 

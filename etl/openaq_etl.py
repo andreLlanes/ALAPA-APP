@@ -91,6 +91,11 @@ COUNTRY_FILTERS = {
     "PH": {
         "bbox": (120.88, 14.30, 121.15, 14.80),
     },
+    # Los Angeles / Southern California metropolitan region — accept ALL providers inside the
+    # LA metro bbox for comparison and validation data.
+    "US": {
+        "bbox": (-118.50, 33.80, -117.90, 34.30),
+    },
 }
 
 # OpenAQ parameter name (lowercased) -> our DB column.

@@ -30,6 +30,7 @@ FORECAST_API_BASE = "https://api.open-meteo.com/v1/forecast"
 CITY_BBOXES = {
     "Metro Manila": (14.316284, 120.868835, 14.781522, 121.143494),
     "Bangkok": (13.600000, 100.400000, 13.950000, 100.850000),
+    "Los Angeles": (33.800000, -118.500000, 34.300000, -117.900000),
 }
 
 METEO_COLUMNS = [

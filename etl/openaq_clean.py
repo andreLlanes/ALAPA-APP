@@ -123,8 +123,8 @@ def apply_flatlines(df: pd.DataFrame) -> dict[str, int]:
 
 def fetch_locations(conn) -> list[str]:
     """Location keys to clean. Singapore is out of scope for this study, so SG locations
-    are excluded here — openaq.locations may still hold them from earlier runs, and
-    without this filter a re-run would re-populate measurements_clean with SG rows."""
+    are excluded here — openaq.locations may still hold them from earlier runs. LA data
+    is included for validation and comparison purposes."""
     query = """
         SELECT location_key
         FROM   openaq.locations
