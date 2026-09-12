@@ -26,9 +26,6 @@ source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Copy `.env-example` to `.env` (at <LOCATION — confirm>) and fill in the Postgres
-connection, OpenAQ API key, and covariate-source credentials.
-
 ## Running
 
 ```bash
