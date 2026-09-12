@@ -1,0 +1,66 @@
+{
+    "request": {
+        "headers": {
+            "accept": "image/tiff",
+            "content-type": "application/json"
+        },
+        "payload": {
+            "evalscript": "\n    function setup(){\n        return{\n            input: [{\n                bands: [\"B04\", \"B08\", \"SCL\", \"dataMask\"]\n            }],\n            mosaicking: \"ORBIT\",\n            output: {\n                bands: 2,\n                sampleType: \"FLOAT32\"\n            }\n        }\n    }\n    function evaluatePixel(samples){\n        var ndvi = [];\n    \n        for (var i = 0; i < samples.length; i++){\n            var scl = samples[i].SCL;\n\n            if (scl === 3 || (scl >= 8 && scl <= 11)) continue;\n            if (samples[i].dataMask === 0) continue;\n\n            var b8 = samples[i].B08, b4 = samples[i].B04;\n            if (b8 + b4 === 0) continue;\n            ndvi.push((b8 - b4) / (b8 + b4));\n        }\n\n        if (ndvi.length === 0) return [0, 0];\n\n        ndvi.sort((a,b) => a - b);\n        var mid = Math.floor(ndvi.length / 2);\n        var median = ndvi.length % 2 !== 0 ? ndvi[mid] : (ndvi[mid-1] + ndvi[mid]) / 2;\n        return [median, 1];\n    }\n",
+            "input": {
+                "bounds": {
+                    "bbox": [
+                        120.868835,
+                        14.316284,
+                        121.143494,
+                        14.781522
+                    ],
+                    "properties": {
+                        "crs": "http://www.opengis.net/def/crs/EPSG/0/4326"
+                    }
+                },
+                "data": [
+                    {
+                        "dataFilter": {
+                            "maxCloudCoverage": 80,
+                            "timeRange": {
+                                "from": "2026-01-01T00:00:00Z",
+                                "to": "2026-05-01T23:59:59Z"
+                            }
+                        },
+                        "type": "sentinel-2-l2a"
+                    }
+                ]
+            },
+            "output": {
+                "height": 2049,
+                "responses": [
+                    {
+                        "format": {
+                            "type": "image/tiff"
+                        },
+                        "identifier": "default"
+                    }
+                ],
+                "width": 1202
+            }
+        },
+        "timestamp": "2026-05-21T02:55:25.220004",
+        "url": "https://sh.dataspace.copernicus.eu/api/v1/process"
+    },
+    "response": {
+        "elapsed": 62.071566,
+        "headers": {
+            "access-control-allow-credentials": "true",
+            "access-control-allow-headers": "origin,content-type,accept,accept-crs,authorization,cache-control",
+            "access-control-allow-methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH",
+            "access-control-allow-origin": "*",
+            "access-control-max-age": "3600",
+            "content-type": "image/tiff",
+            "date": "Wed, 20 May 2026 18:53:19 GMT",
+            "timing-allow-origin": "*",
+            "transfer-encoding": "chunked",
+            "x-processingunits-spent": "432.17967224121094"
+        },
+        "status_code": 200
+    }
+}
