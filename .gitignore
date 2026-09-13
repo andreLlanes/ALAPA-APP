@@ -1,22 +1,40 @@
-# ---- Secrets / environment ----
+# Secrets 
 .env
-.env.*
-!.env.example
+*.env
+!.env-example
 
-# ---- Python bytecode / cache ----
+# Python 
 __pycache__/
 *.py[cod]
 *$py.class
-
-# ---- Virtual environments ----
-.venv/
-venv/
-env/
-ENV/
-
-# ---- Jupyter ----
+*.egg-info/
+.pytest_cache/
 .ipynb_checkpoints/
 
-# ---- OS / editor cruft ----
+# Virtual environments
+venv/
+.venv/
+env/
+O1/venv/
+
+# Pipeline outputs (large; regenerable)
+Outputs/
+**/Outputs/
+
+# Progress ledgers & provenance (run artifacts)
+*_progress.txt
+provenance_log.csv
+upload_manifest.txt
+
+# Data (large raw/intermediate; not committed)
+*.parquet
+*.npz
+*.tif
+*.csv
+!.env-example
+
+# OS / editor cruft
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
