@@ -8,7 +8,7 @@ $$
 \hat{y}_{t+\ell} = \bar{y}_{h(t+\ell)}
 $$
 
-where `h(t + \ell)` is the target hour-of-day and `\bar{y}_h` is the historical
+where $$h(t + \ell)$$ is the target hour-of-day and $$\bar{y}_h$$ is the historical
 mean PM2.5 concentration for that same station and hour-of-day from the training
 period.
 
