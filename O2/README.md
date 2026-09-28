@@ -15,10 +15,13 @@ comparison.
      skill score, imported by the baselines and (later) by the trained models so
      their numbers are always computed the same way.
    - `splits.py` — the chronological 70/15/15 partition of Section 4.7.3.
+   - `ablation.py` — the training-data ablation block sampler of Section 4.7.5.
 2. **Baselines** (`Baselines/`) — naive references that require no training.
    - `persistence.py` — carry the last observed concentration across the horizon.
    - `common_baseline.py` — shard discovery and per-station loading, plus the
      path bootstrap that pulls the column names and horizon from `O1/common`.
+3. **Ablation** (`Ablation/`) — `main.py` writes the ablation manifest the
+   trainers consume.
 
 ## Data partitioning
 
@@ -70,6 +73,82 @@ that evaluation. Each run reports that count rather than leaving it implicit.
 Because the rolling origin varies the test period that the fixed split holds
 constant, agreement between the two indicates that a configuration's standing
 does not depend on the particular months it was tested on.
+
+## Training-data ablation
+
+Section 4.7.5 reduces the Metro Manila training data to 25, 50, and 75 percent of
+the full training partition and compares the best transfer configuration against
+the no-transfer configuration at each level, which is how H5 is read.
+
+`Ablation/main.py` writes the plan; it does not train anything. **The manifest is
+the contract**: every model configuration at a given (level, draw) must read the
+same blocks, or the Bangkok-versus-no-transfer comparison at that level is
+uncontrolled and a difference could be the draw rather than the transfer.
+
+```bash
+cd O2/Ablation
+python main.py --source masked --city "Metro Manila"
+```
+
+Written to `O2/Outputs/ablation/<citySlug>/<source>/`: `manifest.json` (blocks,
+seeds, realized volumes) and `summary.csv` (one row per level and draw).
+
+Only Metro Manila is ablated. H5 asks how transfer benefit varies with the volume
+of *target* training data, so the source cities keep their full record; another
+city is refused unless `--any-city` is passed.
+
+### Consuming the manifest
+
+Trainers read it through `ablation.py` rather than parsing the JSON themselves,
+so no two of them can drift:
+
+```python
+from ablation import load_manifest, manifest_path, manifest_cuts, apply_ablation
+from splits import partition_mask
+
+manifest = load_manifest(manifest_path(OUTPUT_ROOT, "MM", source))
+keep = apply_ablation(origins, manifest, level=0.25, draw=1)   # training mask
+val  = partition_mask(origins, manifest_cuts(manifest), "val") # untouched
+```
+
+Passing *every* origin to `apply_ablation` is safe: the blocks lie inside the
+training span, so validation and test origins match nothing and are excluded. The
+mask both applies the ablation and enforces that only the training partition is
+reduced. `available_draws(manifest)` lists the pairs actually present — iterate
+it rather than assuming a full grid, because duplicate draws are dropped.
+
+Four properties are worth knowing before reading the curve:
+
+- **Contiguous blocks, never random hours.** Hourly data is strongly
+  autocorrelated, so removing random hours would leave a model with nearly the
+  same information and flatten the curve into a null result. Blocks default to
+  four weeks; the manuscript's floor is one week.
+- **Window erosion.** The O1 shards store complete windows, so keeping an origin
+  also keeps its 72 h lookback and 72 h horizon. An origin near a block edge
+  would reach into a discarded block and quietly undo the ablation, so each
+  retained run is trimmed by the window geometry. That costs 143 origins per run,
+  which is why the default block is four weeks rather than one — at the one-week
+  floor, erosion discards about 85 percent of every block. Erosion is applied
+  only where a discarded block actually abuts, so the 100 percent level
+  reproduces the full training partition exactly.
+- **Levels target data volume, not block count.** §4.7.5 reduces the data *to* 25
+  percent, which is a claim about volume. Block rounding plus erosion would
+  otherwise leave a nominal 25 percent delivering about 18, so the block count is
+  calibrated until the realized share hits the target. Both figures are recorded;
+  plot against `realized`. `--no-calibrate` restores block-share semantics.
+- **Levels nest.** All levels within a draw grow along one permutation, so the
+  blocks kept at 25 percent are a subset of those kept at 50. The curve then
+  varies only how much data the model saw, not which months it saw.
+
+Draws are seeded from the draw number alone, so a level can be re-run later and
+reproduce the same blocks. Three draws per level let an unlucky selection be told
+apart from a real effect — except where a draw would duplicate an earlier one, in
+which case it is dropped. At 100 percent there is nothing left to vary, so that
+level carries a single draw instead of three byte-identical training runs.
+
+Ablation is defined on the **fixed split's training partition** only. It is not
+applied to the rolling origin (that would multiply the experiment by four, which
+§4.7.5 does not ask for), and validation and test are never touched.
 
 ## Prerequisite
 
