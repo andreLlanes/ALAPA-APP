@@ -51,12 +51,15 @@ def windows_dir(city, source, model=WINDOW_MODEL):
     return os.path.join(O1_OUTPUT_ROOT, model, city_slug(city), source)
 
 
-def result_dir(baseline, city, source):
+def result_dir(baseline, city, source, *parts):
     """Return (and create) the output folder for one baseline run.
 
-    Layout mirrors O1: Outputs/<baseline>/<citySlug>/<source>/.
+    Layout mirrors O1 with the evaluation protocol and window appended:
+    Outputs/<baseline>/<citySlug>/<source>/<protocol>/<window>/. Keeping both in
+    the path means the fixed split and each rolling origin land in their own
+    folder, so one protocol's results can never overwrite another's.
     """
-    d = os.path.join(OUTPUT_ROOT, baseline, city_slug(city), source)
+    d = os.path.join(OUTPUT_ROOT, baseline, city_slug(city), source, *parts)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -77,6 +80,18 @@ def shard_paths(city, source, model=WINDOW_MODEL):
     names = sorted(f for f in os.listdir(d)
                    if f.endswith(".npz") and f != "nodes.npz")
     return [os.path.join(d, n) for n in names]
+
+
+def load_origins(path):
+    """Return just one station's forecast origins.
+
+    Used for the pass that computes the chronological cut timestamps: the split
+    is defined over every station's origins pooled together, and reading only
+    this array leaves the window tensors in the archive untouched, so the pass
+    costs kilobytes per station rather than megabytes.
+    """
+    with np.load(path, allow_pickle=False) as z:
+        return np.asarray(z["meta_origin"])
 
 
 def load_lookback_pm25(path):

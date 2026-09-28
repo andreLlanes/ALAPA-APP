@@ -10,6 +10,22 @@ from one hour to the next, and decays as the horizon lengthens; it therefore set
 the bar a model must clear to show it has learned usable dynamics rather than
 merely repeating the present.
 
+Protocols. Both temporal designs of Section 4.7.3 are supported and write to
+separate folders:
+
+    fixed   - the test partition of the chronological 70/15/15 split, one
+              contiguous period. This is the partition leave-one-station-out
+              holds fixed while it varies the station.
+    rolling - four origins advancing by three months, each scored on the three
+              months that follow, together spanning a full wet and dry cycle.
+              This varies the test period that the fixed split holds constant,
+              so agreement between the two shows a ranking does not depend on
+              the particular months tested on.
+
+Because persistence fits nothing, only each window's test period affects its
+score; the training spans are still recorded so the models can reuse exactly the
+same windows and the skill score of Section 4.8.3 compares like with like.
+
 Leave-one-station-out. Section 4.8.1 refits every component on the retained
 stations within each fold. Persistence fits nothing and reads only the withheld
 station's own history, so withholding a station changes none of its forecasts:
@@ -26,26 +42,38 @@ forecasting at time t would actually hold. That hour is used and its age is
 recorded as origin_gap_h; a window with no observation anywhere in its lookback
 has no persistence forecast at all and is dropped, counted as windows_no_obs.
 
-Outputs, under O2/Outputs/persistence/<citySlug>/<source>/:
-    folds.csv       - one row per station (one LOSO fold): overall metrics.
-    by_lead.csv     - one row per (station, lead): metrics at each lead time.
-    lead_curve.csv  - fold-averaged metrics per lead, for the skill-vs-lead plot.
-    forecasts/<station>.npz - origin timestamps and y(t), which regenerate every
+Outputs, under O2/Outputs/persistence/<citySlug>/<source>/<protocol>/:
+    windows.json    - the protocol's cut timestamps, spans, and counts.
+    summary.csv     - one row per evaluation window: fold-averaged metrics.
+    <window>/folds.csv      - one row per station (one LOSO fold).
+    <window>/by_lead.csv    - one row per (station, lead).
+    <window>/lead_curve.csv - fold-averaged metrics per lead.
+    <window>/forecasts/<station>.npz - origins and y(t), which regenerate every
                       prediction without storing 72 copies of a constant.
 """
 
+import json
 import os
 
 import numpy as np
 import pandas as pd
 
 from common_baseline import (  # sets sys.path for the O1 schema and builders
-    ALL_CITIES, ALL_SOURCES, result_dir, shard_paths, load_lookback_pm25, safe_name,
+    ALL_CITIES, ALL_SOURCES, result_dir, shard_paths, load_origins,
+    load_lookback_pm25, safe_name,
 )
 from schema import HORIZON_H
 from metrics import all_metrics, METRIC_NAMES
+from splits import (
+    PARTITIONS, ROLLING_ORIGINS, ROLLING_TEST_MONTHS,
+    chronological_cuts, partition_mask, describe,
+    rolling_origin_windows, rolling_mask, describe_rolling,
+)
 
 BASELINE = "persistence"
+PROTOCOLS = ("fixed", "rolling")
+DEFAULT_PROTOCOL = "fixed"
+DEFAULT_SPLIT = "test"
 
 
 def last_observed(lookback_pm25):
@@ -123,42 +151,60 @@ def evaluate_station(location_key, lookback_pm25, Y, horizon=HORIZON_H):
     return fold, by_lead, y_origin
 
 
-def run(source, city, horizon=HORIZON_H):
-    """Score persistence for every station in a (source, city) and write results.
+def pooled_origins(paths):
+    """Return every station's forecast origins concatenated.
 
-    Streams the O1 window shards one station at a time and writes the per-fold,
-    per-lead, and fold-averaged tables described in the module docstring.
+    Reads only the origin arrays, so defining the evaluation windows costs
+    kilobytes per station rather than loading the window tensors.
     """
-    paths = shard_paths(city, source)
-    outdir = result_dir(BASELINE, city, source)
-    forecast_dir = os.path.join(outdir, "forecasts")
-    os.makedirs(forecast_dir, exist_ok=True)
+    collected = [o for o in (load_origins(p) for p in paths) if o.size]
+    if not collected:
+        raise ValueError("no origins found in any shard")
+    return np.concatenate(collected)
 
-    folds, by_lead = [], []
-    for path in paths:
-        location_key, lookback_pm25, Y, origins = load_lookback_pm25(path)
-        if lookback_pm25.shape[0] == 0:
-            continue
-        if Y.shape[1] != horizon:
-            raise ValueError(f"{path}: expected a {horizon}h horizon, found {Y.shape[1]}")
 
-        fold, station_leads, y_origin = evaluate_station(
-            location_key, lookback_pm25, Y, horizon)
-        if fold["windows_scored"] == 0:
-            continue
+def resolve_windows(paths, protocol, split=DEFAULT_SPLIT,
+                    n_origins=ROLLING_ORIGINS, test_months=ROLLING_TEST_MONTHS):
+    """Return the evaluation windows for a protocol, plus a record of them.
 
-        folds.append(fold)
-        by_lead.extend(station_leads)
-        np.savez_compressed(
-            os.path.join(forecast_dir, f"{safe_name(location_key)}.npz"),
-            meta_origin=origins,
-            y_origin=y_origin.astype(np.float32),
-        )
+    Each window pairs a folder name with the mask that selects its origins, so
+    the scoring loop treats the fixed split and the rolling origins identically.
 
+    Returns:
+        windows: list of {"name", "mask"} dicts.
+        record: JSON-serializable description written to windows.json.
+    """
+    origins = pooled_origins(paths)
+
+    if protocol == "fixed":
+        cuts = chronological_cuts(origins)
+        windows = [{"name": split,
+                    "mask": lambda o, c=cuts: partition_mask(o, c, split)}]
+        record = {"protocol": "fixed", "split": split,
+                  "train_end": str(cuts[0]), "val_end": str(cuts[1]),
+                  "partitions": describe(origins, cuts)}
+        return windows, record
+
+    if protocol == "rolling":
+        wins = rolling_origin_windows(origins, n_origins, test_months)
+        windows = [{"name": f"origin{w['origin']}",
+                    "mask": lambda o, w=w: rolling_mask(o, w, "test")}
+                   for w in wins]
+        record = {"protocol": "rolling", "n_origins": n_origins,
+                  "test_months": test_months,
+                  "windows": describe_rolling(origins, wins)}
+        return windows, record
+
+    raise ValueError(f"protocol must be one of {PROTOCOLS}; got {protocol!r}")
+
+
+def _write_window(outdir, folds, by_lead, horizon):
+    """Write one window's per-fold, per-lead, and fold-averaged tables.
+
+    Returns the fold-averaged summary row, or None when nothing was scorable.
+    """
     if not folds:
-        print(f"[{BASELINE}] {source}/{city}: no scorable windows; nothing written")
-        return
-
+        return None
     folds_df = pd.DataFrame(folds)
     leads_df = pd.DataFrame(by_lead)
     # Fold-averaged: each station weighted equally regardless of how many
@@ -171,23 +217,116 @@ def run(source, city, horizon=HORIZON_H):
     leads_df.to_csv(os.path.join(outdir, "by_lead.csv"), index=False)
     curve_df.to_csv(os.path.join(outdir, "lead_curve.csv"), index=False)
 
-    windows = int(folds_df["windows_scored"].sum())
-    dropped = int(folds_df["windows_no_obs"].sum())
-    note = f" ({dropped} dropped, no observed lookback hour)" if dropped else ""
-    mean_rmse = folds_df["rmse"].mean()
-    spread_rmse = folds_df["rmse"].std()
-    mean_mae = folds_df["mae"].mean()
-    mean_mbe = folds_df["mbe"].mean()
-    mean_ioa = folds_df["ioa"].mean()
-    first_lead = curve_df.loc[0, "rmse"]
-    last_lead = curve_df.loc[horizon - 1, "rmse"]
+    return {
+        "n_stations": len(folds_df),
+        "windows_scored": int(folds_df["windows_scored"].sum()),
+        "windows_no_obs": int(folds_df["windows_no_obs"].sum()),
+        "rmse": folds_df["rmse"].mean(),
+        "rmse_sd": folds_df["rmse"].std(),
+        "mae": folds_df["mae"].mean(),
+        "mbe": folds_df["mbe"].mean(),
+        "ioa": folds_df["ioa"].mean(),
+        "r2": folds_df["r2"].mean(),
+        "rmse_lead1": curve_df.loc[0, "rmse"],
+        f"rmse_lead{horizon}": curve_df.loc[horizon - 1, "rmse"],
+    }
 
-    print(f"[{BASELINE}] {source}/{city}: {len(folds_df)} stations, "
-          f"{windows} windows scored{note}")
-    print(f"  fold-averaged RMSE {mean_rmse:.3f} +/- {spread_rmse:.3f} ug/m3 | "
-          f"MAE {mean_mae:.3f} | MBE {mean_mbe:+.3f} | IOA {mean_ioa:.3f}")
-    print(f"  lead 1h RMSE {first_lead:.3f} -> lead {horizon}h RMSE {last_lead:.3f} "
-          f"-> {outdir}")
+
+def run(source, city, protocol=DEFAULT_PROTOCOL, split=DEFAULT_SPLIT,
+        n_origins=ROLLING_ORIGINS, test_months=ROLLING_TEST_MONTHS,
+        horizon=HORIZON_H):
+    """Score persistence for one (source, city) under one protocol.
+
+    Defines the protocol's evaluation windows from the pooled origins, then
+    streams the O1 window shards once, scoring every window from each station's
+    single load rather than re-reading the shards per window.
+    """
+    paths = shard_paths(city, source)
+    windows, record = resolve_windows(paths, protocol, split, n_origins, test_months)
+
+    protocol_dir = result_dir(BASELINE, city, source, protocol)
+    with open(os.path.join(protocol_dir, "windows.json"), "w") as f:
+        json.dump(record, f, indent=2)
+
+    acc = {w["name"]: {"folds": [], "by_lead": [], "absent": 0} for w in windows}
+    for path in paths:
+        location_key, lookback_pm25, Y, origins = load_lookback_pm25(path)
+        if lookback_pm25.shape[0] == 0:
+            continue
+        if Y.shape[1] != horizon:
+            raise ValueError(f"{path}: expected a {horizon}h horizon, found {Y.shape[1]}")
+
+        for window in windows:
+            store = acc[window["name"]]
+            keep = window["mask"](origins)
+            if not keep.any():
+                store["absent"] += 1
+                continue
+
+            fold, station_leads, y_origin = evaluate_station(
+                location_key, lookback_pm25[keep], Y[keep], horizon)
+            if fold["windows_scored"] == 0:
+                store["absent"] += 1
+                continue
+
+            store["folds"].append(fold)
+            store["by_lead"].extend(station_leads)
+            forecast_dir = result_dir(BASELINE, city, source, protocol,
+                                      window["name"], "forecasts")
+            np.savez_compressed(
+                os.path.join(forecast_dir, f"{safe_name(location_key)}.npz"),
+                meta_origin=origins[keep],
+                y_origin=y_origin.astype(np.float32),
+            )
+
+    summary_rows = []
+    for window in windows:
+        name = window["name"]
+        store = acc[name]
+        outdir = result_dir(BASELINE, city, source, protocol, name)
+        row = _write_window(outdir, store["folds"], store["by_lead"], horizon)
+        if row is None:
+            print(f"[{BASELINE}] {source}/{city} [{protocol}/{name}]: "
+                  f"no scorable windows")
+            continue
+        row = {"window": name, "stations_absent": store["absent"], **row}
+        summary_rows.append(row)
+
+        note = (f" ({row['windows_no_obs']} dropped, no observed lookback hour)"
+                if row["windows_no_obs"] else "")
+        absent = (f", {store['absent']} stations absent from this period"
+                  if store["absent"] else "")
+        print(f"[{BASELINE}] {source}/{city} [{protocol}/{name}]: "
+              f"{row['n_stations']} stations, {row['windows_scored']} windows "
+              f"scored{note}{absent}")
+        print(f"  fold-averaged RMSE {row['rmse']:.3f} +/- {row['rmse_sd']:.3f} "
+              f"ug/m3 | MAE {row['mae']:.3f} | MBE {row['mbe']:+.3f} | "
+              f"IOA {row['ioa']:.3f}")
+        print(f"  lead 1h RMSE {row['rmse_lead1']:.3f} -> "
+              f"lead {horizon}h RMSE {row[f'rmse_lead{horizon}']:.3f}")
+
+    if summary_rows:
+        pd.DataFrame(summary_rows).to_csv(
+            os.path.join(protocol_dir, "summary.csv"), index=False)
+    _print_periods(record, protocol)
+    print(f"  -> {protocol_dir}")
+
+
+def _print_periods(record, protocol):
+    """Print the calendar periods the protocol actually used."""
+    if protocol == "fixed":
+        part = record["partitions"].get(record["split"])
+        if part and part["n"]:
+            print(f"  fixed split: {record['split']} period {part['start'][:10]} to "
+                  f"{part['end'][:10]} ({part['days']:.0f} days, "
+                  f"{part['frac']:.1%} of origins)")
+        return
+    print(f"  rolling origin: {record['n_origins']} origins advancing by "
+          f"{record['test_months']} months (expanding training window)")
+    for w in record["windows"]:
+        print(f"    origin {w['origin']}: train through {w['train_end'][:10]} "
+              f"({w['n_train']} origins) -> test {w['test_start'][:10]} to "
+              f"{w['test_end'][:10]} ({w['n_test']} origins)")
 
 
 if __name__ == "__main__":
@@ -195,4 +334,15 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--source", required=True, choices=ALL_SOURCES)
     p.add_argument("--city", required=True, choices=ALL_CITIES)
+    p.add_argument("--protocol", default=DEFAULT_PROTOCOL, choices=PROTOCOLS,
+                   help="temporal evaluation design (default: fixed)")
+    p.add_argument("--split", default=DEFAULT_SPLIT,
+                   choices=list(PARTITIONS) + ["all"],
+                   help="partition to score under --protocol fixed (default: test)")
+    p.add_argument("--origins", type=int, default=ROLLING_ORIGINS,
+                   dest="n_origins",
+                   help="number of rolling origins (default: 4)")
+    p.add_argument("--test-months", type=int, default=ROLLING_TEST_MONTHS,
+                   dest="test_months",
+                   help="length of each rolling test period, in months (default: 3)")
     run(**vars(p.parse_args()))
