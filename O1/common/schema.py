@@ -61,3 +61,35 @@ def contiguous_step_mask(times: np.ndarray) -> np.ndarray:
     ok[0] = True
     ok[1:] = (times[1:] - times[:-1]) == one_hour
     return ok
+
+
+def exclusion_window_starts(g, lookback: int = LOOKBACK_H, horizon: int = HORIZON_H) -> np.ndarray:
+    """Return the start rows of every valid exclusion window in one station's frame.
+
+    The single definition of a usable window, shared by the LSTM builder and the
+    baselines so they are always scored on the same windows. A window starting at
+    row ``s`` is valid when the encoder features are complete over the lookback,
+    the decoder features and PM2.5 target are complete over the horizon, and every
+    step is exactly one hour after the last. ``g`` must be sorted by time.
+    """
+    window_len = lookback + horizon
+    n = len(g)
+    if n < window_len:
+        return np.empty(0, dtype=int)
+
+    enc_ok = ~np.isnan(g[ENCODER_COLS].to_numpy(dtype=float)).any(axis=1)
+    dec_ok = ~np.isnan(g[DECODER_COLS].to_numpy(dtype=float)).any(axis=1)
+    pm_ok = ~np.isnan(g[PM25_COL].to_numpy(dtype=float))
+    step_ok = contiguous_step_mask(g[TIME_COL].to_numpy())
+
+    def all_true(mask, lo, hi):
+        """For each start s, whether mask[s+lo : s+hi] is entirely True."""
+        c = np.concatenate([[0], np.cumsum(mask)])
+        s = np.arange(n - window_len + 1)
+        return (c[s + hi] - c[s + lo]) == (hi - lo)
+
+    valid = (all_true(enc_ok, 0, lookback)
+             & all_true(dec_ok, lookback, window_len)
+             & all_true(pm_ok, lookback, window_len)
+             & all_true(step_ok, 1, window_len))
+    return np.flatnonzero(valid)

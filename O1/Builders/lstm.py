@@ -18,7 +18,7 @@ import pandas as pd
 from common_build import station_keys, load_station, shard_dir, safe_name  # sets sys.path
 from schema import (
     KEY_COL, TIME_COL, PM25_COL, ENCODER_COLS, DECODER_COLS,
-    LOOKBACK_H, HORIZON_H, contiguous_step_mask,
+    LOOKBACK_H, HORIZON_H, exclusion_window_starts,
 )
 from _masked_windows import build_lstm_windows_masked
 
@@ -27,7 +27,8 @@ def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
     """Slice a station's frame into exclusion windows (no NaN anywhere).
 
     A window is emitted only when the encoder features, decoder features, target,
-    and step contiguity are all valid across its span.
+    and step contiguity are all valid across its span; the rule itself lives in
+    schema.exclusion_window_starts so the baselines select the same windows.
 
     Returns:
         X_enc: (n, lookback, |ENCODER_COLS|) past features.
@@ -45,22 +46,11 @@ def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
         pm25 = g[PM25_COL].to_numpy(dtype=float)
         times = g[TIME_COL].to_numpy()
 
-        enc_ok = ~np.isnan(enc_vals).any(axis=1)
-        dec_ok = ~np.isnan(dec_vals).any(axis=1)
-        pm_ok = ~np.isnan(pm25)
-        step_ok = contiguous_step_mask(times)
-
-        for start in range(0, len(g) - window_len + 1, stride):
+        for start in exclusion_window_starts(g, lookback, horizon):
+            if start % stride:
+                continue
             mid = start + lookback
             end = start + window_len
-            if not enc_ok[start:mid].all():
-                continue
-            if not dec_ok[mid:end].all():
-                continue
-            if not pm_ok[mid:end].all():
-                continue
-            if not step_ok[start + 1:end].all():
-                continue
             Xe.append(enc_vals[start:mid])
             Xd.append(dec_vals[mid:end])
             Ys.append(pm25[mid:end])
