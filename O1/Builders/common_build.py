@@ -1,6 +1,6 @@
 """Shared helpers for the dataset builders.
 
-Reads the merged tables (openaq.merged_clean / openaq.merged_masked) one station
+Reads the merged tables (MERGED_TABLE / MASKED_TABLE in common/schema.py) one station
 at a time so no whole city is ever held in memory, which is required for building
 LA and Bangkok on a small machine. Window arrays are written as float32 shards,
 one file per station, under Outputs/<model>/<citySlug>/<source>/.
@@ -29,9 +29,11 @@ for _p in (os.path.join(_PIPELINE_ROOT, "common"), _HERE, os.path.join(_HERE, "M
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from schema import MERGED_TABLE, MASKED_TABLE  # noqa: E402  (path set just above)
+
 CITY_TABLES = {
-    "clean": "openaq.merged_clean",
-    "masked": "openaq.merged_masked",
+    "clean": MERGED_TABLE,
+    "masked": MASKED_TABLE,
 }
 
 # Full city name (used in SQL) -> short slug (used in output paths).

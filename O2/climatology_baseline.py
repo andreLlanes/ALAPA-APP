@@ -28,8 +28,11 @@ from dotenv import load_dotenv
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "O1", "common"))
 
-DEFAULT_SOURCE_TABLE = "openaq.merged_clean"
+from schema import MERGED_TABLE  # noqa: E402  (path set just above)
+
+DEFAULT_SOURCE_TABLE = MERGED_TABLE
 DEFAULT_OUTPUT_TABLE = "openaq.climatology_baseline"
 LOOKBACK_H = 72
 HORIZON_H = 72

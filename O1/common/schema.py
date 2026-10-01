@@ -11,6 +11,12 @@ PM25_COL = "pm25"
 KEY_COL = "location_key"
 TIME_COL = "timestamp_utc"
 
+# Merged tables written by Clean/ and read by Builders/ and O2. Versioned so a
+# rebuild under a changed schema never writes into, or reads from, an older one;
+# bump the suffix here and every reader follows.
+MERGED_TABLE = "openaq.merged_clean_v2"   # rows with pm25 present
+MASKED_TABLE = "openaq.merged_masked_v2"  # every active-range hour, long gaps as NULL
+
 # Meteorological covariates; wind is stored as u/v components, not speed/direction.
 MET_COLS = [
     "wind_u",

@@ -35,18 +35,25 @@ _COMMON_DIR = os.path.abspath(os.path.join(_HERE, "..", "common"))
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 sys.path.insert(0, _COMMON_DIR)
 
-from schema import MET_COLS, TIME_COLS, TIME_COL
+from schema import MET_COLS, TIME_COLS, TIME_COL, MERGED_TABLE, MASKED_TABLE
 from clean import clean_one_station
 from build_features import build_features
 
 RAW_MEASUREMENTS_TABLE = "openaq.gs_measurements"
 RAW_MET_TABLE = "openaq.ifs_met"
 STATIONS_TABLE = "openaq.gs_stations"
-MERGED_TABLE = "openaq.merged_clean"
-MASKED_TABLE = "openaq.merged_masked"
 UPSERT_CHUNK_SIZE = 5000
-LEDGER_PATH = "merged_progress.txt"
-PROVENANCE_PATH = "provenance_log.csv"
+# Ledger and provenance are named after the table version, so a ledger left by a
+# build of another version can never make this one skip stations.
+_VERSION_TAG = MERGED_TABLE.split(".")[-1]
+LEDGER_PATH = os.path.join(_HERE, f"{_VERSION_TAG}_progress.txt")
+PROVENANCE_PATH = os.path.join(_HERE, f"provenance_{_VERSION_TAG}.csv")
+
+# Every column store_rows writes; checked against the live tables before a run.
+STORED_COLS = (["location_key", "timestamp_utc", "city", "pm25",
+                "short_gap_filled", "long_gap_missing", "is_monitor",
+                "latitude", "longitude", "grid_latitude", "grid_longitude"]
+               + MET_COLS + TIME_COLS)
 PROVENANCE_FIELDS = [
     "city", "location_key", "raw_rows", "nonpositive_dropped", "duplicate_rows",
     "active_range_hours", "gap_hours_inserted", "is_reference",
@@ -113,7 +120,11 @@ def get_conn():
                 pass
             _CONN = None
     if _CONN is None or _CONN.closed != 0:
-        _CONN = psycopg2.connect(_PG_DSN)
+        # Keepalives make a silently dropped network fail within about a minute
+        # instead of hanging forever, so the run stops cleanly and can resume.
+        _CONN = psycopg2.connect(_PG_DSN, connect_timeout=30, keepalives=1,
+                                 keepalives_idle=30, keepalives_interval=10,
+                                 keepalives_count=3)
     return _CONN
 
 
@@ -154,6 +165,29 @@ def create_table_if_needed():
             cur.execute(ddl)
     conn.commit()
     print(f"Ensured {MERGED_TABLE} and {MASKED_TABLE} exist.")
+
+
+def check_table_columns():
+    """Stop before any work if a target table lacks a column this build writes.
+
+    CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so a table
+    built under an older schema would otherwise fail on every insert.
+    """
+    conn = get_conn()
+    for table in (MERGED_TABLE, MASKED_TABLE):
+        schema, name = table.split(".")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema, name))
+            present = {r[0] for r in cur.fetchall()}
+        missing = [c for c in STORED_COLS if c not in present]
+        if missing:
+            raise RuntimeError(
+                f"{table} exists but lacks {missing}; it was built under another "
+                f"schema. Bump MERGED_TABLE/MASKED_TABLE in common/schema.py "
+                f"rather than writing into it.")
 
 
 def _read_sql(query, params=None):
@@ -251,10 +285,7 @@ def store_rows(table, df):
         conn.commit()
         print(f"  committed 0 rows to {table}")
         return
-    cols = (["location_key", "timestamp_utc", "city", "pm25",
-             "short_gap_filled", "long_gap_missing", "is_monitor",
-             "latitude", "longitude", "grid_latitude", "grid_longitude"]
-            + MET_COLS + TIME_COLS)
+    cols = STORED_COLS
     values = [tuple(_na_to_none(getattr(r, c, None)) for c in cols)
               for r in df.itertuples(index=False)]
     col_sql = ", ".join(cols)
@@ -291,11 +322,11 @@ def _match_one_station(lat, lon, cells):
     return float(cells["latitude"].iloc[j]), float(cells["longitude"].iloc[j])
 
 
-def process_city(city, done, prov):
+def process_city(city, done, prov, pf):
     """Stream a city's stations, clean and merge each, and write both tables.
 
-    Skips stations already in ``done``, appends one provenance row per station,
-    and records each completed station in the ledger.
+    Skips stations already in ``done``, appends one provenance row per station
+    (flushed through ``pf``), and records each completed station in the ledger.
     """
     print(f"{city}: streaming stations")
     stations = fetch_stations(city)
@@ -367,29 +398,45 @@ def process_city(city, done, prov):
             rec["stored_rows_masked"] = len(cleaned)
 
         prov.writerow(rec)
+        # Flush before the ledger marks the station done, so a killed run can
+        # never leave a finished station without its provenance row.
+        pf.flush()
         append_ledger(city, location_key)
         done.add((city, location_key))
 
     print(f"  {city} done")
 
 
-def main():
-    """Process every city, writing both tables and the provenance log."""
+def main(cities=CITIES):
+    """Process the given cities, writing both tables and the provenance log."""
     done = load_ledger()
     print(f"Loaded {len(done)} completed (city, station) entries from {LEDGER_PATH}.")
     create_table_if_needed()
-    new_log = not os.path.exists(PROVENANCE_PATH)
+    check_table_columns()
+    # An empty file (e.g. left by a killed run) still needs its header.
+    new_log = not os.path.exists(PROVENANCE_PATH) or os.path.getsize(PROVENANCE_PATH) == 0
+    failed = []
     with open(PROVENANCE_PATH, "a", newline="") as pf:
         prov = csv.DictWriter(pf, fieldnames=PROVENANCE_FIELDS)
         if new_log:
             prov.writeheader()
-        for city in CITIES:
+        for city in cities:
             try:
-                process_city(city, done, prov)
+                process_city(city, done, prov, pf)
             except Exception as exc:
                 print(f"{city}: failed, left for a later run: {exc}")
-    print(f"Done. Provenance written to {PROVENANCE_PATH}.")
+                failed.append(city)
+    print(f"Provenance written to {PROVENANCE_PATH}.")
+    if failed:
+        # Rerunning resumes from the ledger, so only the unfinished stations redo.
+        raise SystemExit(f"Incomplete: {', '.join(failed)} failed. Rerun to resume.")
+    print(f"Done: {', '.join(cities)} written to {MERGED_TABLE} and {MASKED_TABLE}.")
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--city", default="all", choices=CITIES + ["all"],
+                   help='one city, or "all" (default) for every city in order')
+    args = p.parse_args()
+    main(CITIES if args.city == "all" else [args.city])
