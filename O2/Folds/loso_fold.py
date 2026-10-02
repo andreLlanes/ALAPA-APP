@@ -7,11 +7,24 @@ limited to twenty stations, chosen once and frozen so that every configuration
 (baselines, LSTM, GNN, GBT, every transfer variant) is scored on identical folds,
 which is what makes the paired comparisons of Section 4.8.5 valid.
 
+LOSO is scored through regression-kriging: the forecast at a withheld station is
+the kriged surface of the retained stations' forecasts, so no method uses any of
+the withheld station's own data. A withheld station is scored only on its windows
+in the test period of the frozen split (O2/common/split_dates.json): Section
+4.7.3 has leave-one-station-out hold the test period fixed, and kriged forecasts
+at earlier times would draw on in-sample predictions at the retained stations.
+
 Selection, in order:
-    1. Eligibility. A station is eligible only if it reported at least 90% of
-       the hours in its own active range (Section 4.3.1). Reported hours are
-       counted after QC and before gap filling, so interpolated hours do not
-       count toward completeness.
+    1. Eligibility. A station is eligible only if
+       a. it reported at least 70% of the hours in its own active range. Reported
+          hours are counted after QC and before gap filling, so interpolated hours
+          do not count. (The 75% EPA criterion leaves too few stations for twenty
+          folds.)
+       b. it has at least MIN_GRADED_WINDOWS usable windows in the scored period,
+          counted with the models' window rule (schema.exclusion_window_starts)
+          and the split's purge gap, so no fold is empty or nearly so.
+       No training-period history is required: under kriging the withheld
+       station's own past is never used.
     2. Density. Each eligible station's density is the geodesic distance to its
        k-th nearest eligible neighbor, the same measure Section 4.8.1 plots the
        per-fold error against. Small distance = densely monitored core.
@@ -22,8 +35,14 @@ Selection, in order:
        stations than its share gives all of them, and the shortfall is taken
        from the other bands, nearest band first.
 
-The eligible stations double as the training pool: each fold trains on every
-eligible station except the one withheld.
+Two station lists are saved, because holding a station out and training on it
+need different rules:
+    training pool - every station meeting the study's quality rule (rule 1a).
+                    Each fold trains on all of them except the one withheld.
+    eligible      - the training-pool stations that can also be scored (rule
+                    1b); the twenty folds are drawn from these.
+A station with a good record that stopped reporting before the test period
+fails rule 1b, so it is never withheld, but it still trains every fold.
 
 Output is one JSON file (committed, unlike the gitignored CSV outputs) holding
 the settings, the eligible stations, and the folds. Downstream code reads it
@@ -53,18 +72,23 @@ import pandas as pd
 from dotenv import load_dotenv
 
 _HERE = os.path.dirname(os.path.abspath(__file__))   # O2/Folds
-_REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
+_O2_ROOT = os.path.dirname(_HERE)
+_REPO_ROOT = os.path.dirname(_O2_ROOT)
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
-sys.path.insert(0, os.path.join(_REPO_ROOT, "O1", "common"))
+for _p in (os.path.join(_REPO_ROOT, "O1", "common"), os.path.join(_O2_ROOT, "common")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from schema import MASKED_TABLE  # noqa: E402  (path set just above)
+from splits import PURGE_HOURS, SPLIT_DATES_PATH, frozen_fixed_cuts, partition_mask  # noqa: E402
 
 SOURCE_TABLE = MASKED_TABLE
 CITY = "Metro Manila"
 DEFAULT_OUT = os.path.join(_HERE, "loso_folds.json")
 
 N_FOLDS = 20
-COMPLETENESS_MIN = 0.90  # Section 4.3.1; matches O1/Clean/common_preprocess.py
+COMPLETENESS_MIN = 0.70    # measured hours over the active range (rule 1a)
+MIN_GRADED_WINDOWS = 100   # usable windows in the test period (rule 1b)
 K_NEIGHBOR = 3
 N_BANDS = 4
 BAND_NAMES = {3: ("core", "middle", "periphery"),
@@ -124,6 +148,32 @@ def fetch_station_stats(city: str = CITY, table: str = SOURCE_TABLE) -> pd.DataF
     return frame
 
 
+def count_graded_windows(keys, cuts) -> dict:
+    """Return {station: usable windows in the scored period} for the given stations.
+
+    The scored period is the test partition of the frozen split, selected with
+    splits.partition_mask exactly as it will be at scoring time. Windows follow
+    the models' rule (schema.exclusion_window_starts) on the clean merged table.
+    """
+    builders = os.path.join(_REPO_ROOT, "O1", "Builders")
+    if builders not in sys.path:
+        sys.path.insert(0, builders)
+    from common_build import load_station  # noqa: E402  (database access)
+    from schema import LOOKBACK_H, TIME_COL, exclusion_window_starts  # noqa: E402
+
+    counts = {}
+    for key in keys:
+        g = load_station("clean", key)
+        if g.empty:
+            counts[key] = 0
+            continue
+        g = g.sort_values(TIME_COL).reset_index(drop=True)
+        starts = exclusion_window_starts(g)
+        origins = g[TIME_COL].dt.tz_convert(None).to_numpy()[starts + LOOKBACK_H - 1]
+        counts[key] = int(partition_mask(origins, cuts, "test").sum())
+    return counts
+
+
 def demo_station_stats(n: int = 69, seed: int = 7) -> pd.DataFrame:
     """Synthetic stations: a dense central cluster plus a sparse periphery.
 
@@ -144,6 +194,7 @@ def demo_station_stats(n: int = 69, seed: int = 7) -> pd.DataFrame:
         "longitude": coords[:, 1],
         "active_hours": active,
         "reported_hours": np.floor(active * completeness).astype(int),
+        "graded_windows": rng.integers(0, 1500, size=n),
     })
 
 
@@ -157,14 +208,27 @@ def haversine_matrix_km(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     return 2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
 
 
-def eligible_stations(stats: pd.DataFrame, threshold: float = COMPLETENESS_MIN) -> pd.DataFrame:
-    """Return stations that meet the completeness rule and have coordinates."""
+def add_completeness(stats: pd.DataFrame) -> pd.DataFrame:
+    """Attach measured-hour completeness over each station's active range."""
     stats = stats.copy()
     stats["completeness"] = stats["reported_hours"] / stats["active_hours"].where(
         stats["active_hours"] > 0)
+    return stats
+
+
+def training_pool(stats: pd.DataFrame, threshold: float = COMPLETENESS_MIN) -> pd.DataFrame:
+    """Return stations with coordinates that meet the quality rule (rule 1a)."""
     has_coords = stats["latitude"].notna() & stats["longitude"].notna()
     keep = has_coords & (stats["completeness"] >= threshold)
     return stats[keep].sort_values("location_key").reset_index(drop=True)
+
+
+def eligible_stations(stats: pd.DataFrame, threshold: float = COMPLETENESS_MIN,
+                      min_windows: int = MIN_GRADED_WINDOWS) -> pd.DataFrame:
+    """Return training-pool stations that can also be scored (rules 1a and 1b)."""
+    pool = training_pool(stats, threshold)
+    keep = pool["graded_windows"].fillna(0) >= min_windows
+    return pool[keep].reset_index(drop=True)
 
 
 def add_density_bands(eligible: pd.DataFrame, k: int = K_NEIGHBOR,
@@ -242,9 +306,9 @@ def select_folds(banded: pd.DataFrame, n_folds: int = N_FOLDS, seed: int = SEED)
     return folds
 
 
-def build_record(stats: pd.DataFrame, banded: pd.DataFrame, folds: pd.DataFrame,
-                 settings: dict) -> dict:
-    """Assemble the frozen JSON record: settings, band summary, stations, folds."""
+def build_record(stats: pd.DataFrame, pool: pd.DataFrame, banded: pd.DataFrame,
+                 folds: pd.DataFrame, settings: dict) -> dict:
+    """Assemble the frozen JSON record: settings, bands, training pool, eligible, folds."""
     n_bands = settings["n_bands"]
     bands = []
     for b in range(n_bands):
@@ -263,14 +327,16 @@ def build_record(stats: pd.DataFrame, banded: pd.DataFrame, folds: pd.DataFrame,
                      int(v) if isinstance(v, (np.integer,)) else v)
                  for c, v in zip(cols, r)} for r in frame[cols].itertuples(index=False)]
 
-    station_cols = ["location_key", "latitude", "longitude", "completeness",
-                    "knn_distance_km", "band", "density_band"]
+    pool_cols = ["location_key", "latitude", "longitude", "completeness", "graded_windows"]
+    station_cols = pool_cols + ["knn_distance_km", "band", "density_band"]
     return {
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "settings": settings,
         "n_stations_total": int(len(stats)),
+        "n_training_pool": int(len(pool)),
         "n_eligible": int(len(banded)),
         "bands": bands,
+        "training_pool": rows(pool, pool_cols),
         "eligible_stations": rows(banded, station_cols),
         "folds": rows(folds, ["fold_id"] + station_cols),
     }
@@ -285,9 +351,11 @@ def load_folds(path: str = DEFAULT_OUT) -> dict:
 def iter_loso_folds(record: dict):
     """Yield (fold_id, held_out_key, train_keys) for each frozen fold.
 
-    The training pool is every eligible station except the one withheld.
+    Each fold trains on the whole training pool except the one withheld. (Files
+    frozen before the training pool was recorded fall back to the eligible list.)
     """
-    pool = [s["location_key"] for s in record["eligible_stations"]]
+    pool = [s["location_key"]
+            for s in record.get("training_pool", record["eligible_stations"])]
     for fold in record["folds"]:
         held = fold["location_key"]
         yield fold["fold_id"], held, [k for k in pool if k != held]
@@ -303,6 +371,8 @@ def parse_args() -> argparse.Namespace:
                    help="k for the k-th-nearest-neighbor density distance")
     p.add_argument("--n-bands", type=int, default=N_BANDS)
     p.add_argument("--completeness", type=float, default=COMPLETENESS_MIN)
+    p.add_argument("--min-windows", type=int, default=MIN_GRADED_WINDOWS,
+                   help="usable windows required in the test period")
     p.add_argument("--seed", type=int, default=SEED)
     p.add_argument("--demo", action="store_true",
                    help="use synthetic stations instead of the database")
@@ -318,8 +388,19 @@ def main() -> None:
             f"{args.out} already exists. The folds are frozen; pass --overwrite only if "
             f"every result scored on them will be rerun.")
 
-    stats = demo_station_stats() if args.demo else fetch_station_stats(args.city, args.source_table)
-    eligible = eligible_stations(stats, args.completeness)
+    cuts = frozen_fixed_cuts(args.city)
+    if args.demo:
+        stats = add_completeness(demo_station_stats())
+    else:
+        stats = add_completeness(fetch_station_stats(args.city, args.source_table))
+        # Windows are only counted where completeness already passes; that is the
+        # slow step (one table read per station).
+        passing = stats.loc[stats["completeness"] >= args.completeness, "location_key"]
+        counts = count_graded_windows(passing, cuts)
+        # Stations failing completeness were not counted; record them as 0.
+        stats["graded_windows"] = stats["location_key"].map(counts).fillna(0).astype(int)
+    pool = training_pool(stats, args.completeness)
+    eligible = eligible_stations(stats, args.completeness, args.min_windows)
     banded = add_density_bands(eligible, args.k, args.n_bands)
     folds = select_folds(banded, args.n_folds, args.seed)
 
@@ -328,18 +409,27 @@ def main() -> None:
         "source": "demo" if args.demo else args.source_table,
         "n_folds": args.n_folds,
         "completeness_min": args.completeness,
+        "min_graded_windows": args.min_windows,
         "k_neighbor": args.k,
         "n_bands": args.n_bands,
         "seed": args.seed,
+        "scoring": {
+            "method": "regression-kriging of the retained stations' forecasts",
+            "period": "test partition of the frozen split",
+            "scored_after_utc": str(cuts[1]),
+            "purge_hours": PURGE_HOURS,
+            "split_dates": os.path.relpath(SPLIT_DATES_PATH, _REPO_ROOT).replace(os.sep, "/"),
+        },
     }
-    record = build_record(stats, banded, folds, settings)
+    record = build_record(stats, pool, banded, folds, settings)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
 
-    print(f"{len(stats)} stations, {len(banded)} eligible "
-          f"(completeness >= {args.completeness:.0%}), k={args.k}")
+    print(f"{len(stats)} stations | training pool (completeness >= {args.completeness:.0%}): "
+          f"{len(pool)} | eligible (+ >= {args.min_windows} test windows after "
+          f"{str(cuts[1])[:16]}): {len(banded)} | k={args.k}")
     for b in record["bands"]:
         print(f"  {b['name']:<10} {b['knn_km_min']:6.2f}-{b['knn_km_max']:6.2f} km  "
               f"eligible {b['n_eligible']:3d}  selected {b['n_selected']:2d}")

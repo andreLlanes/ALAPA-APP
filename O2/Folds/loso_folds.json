@@ -1,0 +1,750 @@
+{
+  "created_utc": "2026-10-02T17:47:33+00:00",
+  "settings": {
+    "city": "Metro Manila",
+    "source": "openaq.merged_masked_v2",
+    "n_folds": 20,
+    "completeness_min": 0.7,
+    "min_graded_windows": 100,
+    "k_neighbor": 3,
+    "n_bands": 4,
+    "seed": 2026,
+    "scoring": {
+      "method": "regression-kriging of the retained stations' forecasts",
+      "period": "test partition of the frozen split",
+      "scored_after_utc": "2026-02-22T19:00:00.000000000",
+      "purge_hours": 72,
+      "split_dates": "O2/common/split_dates.json"
+    }
+  },
+  "n_stations_total": 67,
+  "n_training_pool": 31,
+  "n_eligible": 25,
+  "bands": [
+    {
+      "band": 0,
+      "name": "core",
+      "knn_km_min": 1.997,
+      "knn_km_max": 2.747,
+      "n_eligible": 7,
+      "n_selected": 5
+    },
+    {
+      "band": 1,
+      "name": "inner",
+      "knn_km_min": 3.217,
+      "knn_km_max": 4.14,
+      "n_eligible": 6,
+      "n_selected": 5
+    },
+    {
+      "band": 2,
+      "name": "outer",
+      "knn_km_min": 4.225,
+      "knn_km_max": 4.977,
+      "n_eligible": 6,
+      "n_selected": 5
+    },
+    {
+      "band": 3,
+      "name": "periphery",
+      "knn_km_min": 5.065,
+      "knn_km_max": 10.247,
+      "n_eligible": 6,
+      "n_selected": 5
+    }
+  ],
+  "training_pool": [
+    {
+      "location_key": "openaq:1543132",
+      "latitude": 14.57711,
+      "longitude": 120.9778,
+      "completeness": 0.852235,
+      "graded_windows": 0
+    },
+    {
+      "location_key": "openaq:2812750",
+      "latitude": 14.58594,
+      "longitude": 121.02932,
+      "completeness": 0.82785,
+      "graded_windows": 0
+    },
+    {
+      "location_key": "openaq:3015285",
+      "latitude": 14.58853,
+      "longitude": 121.05822,
+      "completeness": 0.756333,
+      "graded_windows": 179
+    },
+    {
+      "location_key": "openaq:3027756",
+      "latitude": 14.63525,
+      "longitude": 121.07784,
+      "completeness": 0.731224,
+      "graded_windows": 160
+    },
+    {
+      "location_key": "openaq:3370151",
+      "latitude": 14.58455,
+      "longitude": 121.01877,
+      "completeness": 0.802909,
+      "graded_windows": 196
+    },
+    {
+      "location_key": "openaq:3990425",
+      "latitude": 14.57863,
+      "longitude": 121.05675,
+      "completeness": 0.793924,
+      "graded_windows": 196
+    },
+    {
+      "location_key": "openaq:3990426",
+      "latitude": 14.45627,
+      "longitude": 121.04569,
+      "completeness": 0.794574,
+      "graded_windows": 197
+    },
+    {
+      "location_key": "openaq:4049149",
+      "latitude": 14.566375,
+      "longitude": 120.992237,
+      "completeness": 0.942862,
+      "graded_windows": 0
+    },
+    {
+      "location_key": "openaq:4526987",
+      "latitude": 14.65744,
+      "longitude": 120.98362,
+      "completeness": 0.799687,
+      "graded_windows": 197
+    },
+    {
+      "location_key": "openaq:4526988",
+      "latitude": 14.63842,
+      "longitude": 121.0767,
+      "completeness": 0.794268,
+      "graded_windows": 197
+    },
+    {
+      "location_key": "openaq:4526989",
+      "latitude": 14.52917,
+      "longitude": 120.98988,
+      "completeness": 0.782595,
+      "graded_windows": 197
+    },
+    {
+      "location_key": "openaq:4565934",
+      "latitude": 14.6354,
+      "longitude": 121.0779,
+      "completeness": 0.967463,
+      "graded_windows": 2566
+    },
+    {
+      "location_key": "openaq:4795495",
+      "latitude": 14.63666,
+      "longitude": 120.96414,
+      "completeness": 0.70425,
+      "graded_windows": 141
+    },
+    {
+      "location_key": "openaq:4795497",
+      "latitude": 14.69397,
+      "longitude": 121.00919,
+      "completeness": 0.706803,
+      "graded_windows": 159
+    },
+    {
+      "location_key": "openaq:4795499",
+      "latitude": 14.66916,
+      "longitude": 120.97576,
+      "completeness": 0.702919,
+      "graded_windows": 148
+    },
+    {
+      "location_key": "openaq:4797638",
+      "latitude": 14.58655,
+      "longitude": 121.02549,
+      "completeness": 0.708306,
+      "graded_windows": 136
+    },
+    {
+      "location_key": "openaq:4797641",
+      "latitude": 14.56383,
+      "longitude": 121.05797,
+      "completeness": 0.702421,
+      "graded_windows": 166
+    },
+    {
+      "location_key": "openaq:4797642",
+      "latitude": 14.54848,
+      "longitude": 121.00053,
+      "completeness": 0.702532,
+      "graded_windows": 153
+    },
+    {
+      "location_key": "openaq:4797643",
+      "latitude": 14.54939,
+      "longitude": 121.07264,
+      "completeness": 0.703087,
+      "graded_windows": 136
+    },
+    {
+      "location_key": "openaq:4797645",
+      "latitude": 14.56838,
+      "longitude": 121.02845,
+      "completeness": 0.700311,
+      "graded_windows": 136
+    },
+    {
+      "location_key": "openaq:4797647",
+      "latitude": 14.6341,
+      "longitude": 121.09803,
+      "completeness": 0.701754,
+      "graded_windows": 148
+    },
+    {
+      "location_key": "openaq:4797649",
+      "latitude": 14.52904,
+      "longitude": 121.00472,
+      "completeness": 0.700644,
+      "graded_windows": 167
+    },
+    {
+      "location_key": "openaq:4797652",
+      "latitude": 14.71405,
+      "longitude": 121.00088,
+      "completeness": 0.702754,
+      "graded_windows": 165
+    },
+    {
+      "location_key": "openaq:4797660",
+      "latitude": 14.71071,
+      "longitude": 120.99545,
+      "completeness": 0.704974,
+      "graded_windows": 141
+    },
+    {
+      "location_key": "openaq:4963739",
+      "latitude": 14.59083,
+      "longitude": 121.07037,
+      "completeness": 0.816561,
+      "graded_windows": 197
+    },
+    {
+      "location_key": "openaq:5963700",
+      "latitude": 14.6227,
+      "longitude": 121.0528,
+      "completeness": 1.0,
+      "graded_windows": 0
+    },
+    {
+      "location_key": "openaq:5976206",
+      "latitude": 14.437546,
+      "longitude": 121.000088,
+      "completeness": 0.702599,
+      "graded_windows": 2098
+    },
+    {
+      "location_key": "openaq:6230501",
+      "latitude": 14.74595,
+      "longitude": 121.010146,
+      "completeness": 0.990424,
+      "graded_windows": 2687
+    },
+    {
+      "location_key": "openaq:6265529",
+      "latitude": 14.65568,
+      "longitude": 121.11149,
+      "completeness": 1.0,
+      "graded_windows": 0
+    },
+    {
+      "location_key": "openaq:6340868",
+      "latitude": 14.676664,
+      "longitude": 121.095814,
+      "completeness": 0.989592,
+      "graded_windows": 1106
+    },
+    {
+      "location_key": "openaq:6391974",
+      "latitude": 14.576655,
+      "longitude": 121.070464,
+      "completeness": 0.868132,
+      "graded_windows": 30
+    }
+  ],
+  "eligible_stations": [
+    {
+      "location_key": "openaq:3015285",
+      "latitude": 14.58853,
+      "longitude": 121.05822,
+      "completeness": 0.756333,
+      "graded_windows": 179,
+      "knn_distance_km": 2.74665,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:3027756",
+      "latitude": 14.63525,
+      "longitude": 121.07784,
+      "completeness": 0.731224,
+      "graded_windows": 160,
+      "knn_distance_km": 2.175953,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:3370151",
+      "latitude": 14.58455,
+      "longitude": 121.01877,
+      "completeness": 0.802909,
+      "graded_windows": 196,
+      "knn_distance_km": 4.139832,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:3990425",
+      "latitude": 14.57863,
+      "longitude": 121.05675,
+      "completeness": 0.793924,
+      "graded_windows": 196,
+      "knn_distance_km": 1.997126,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:3990426",
+      "latitude": 14.45627,
+      "longitude": 121.04569,
+      "completeness": 0.794574,
+      "graded_windows": 197,
+      "knn_distance_km": 10.090053,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:4526987",
+      "latitude": 14.65744,
+      "longitude": 120.98362,
+      "completeness": 0.799687,
+      "graded_windows": 197,
+      "knn_distance_km": 4.905581,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "location_key": "openaq:4526988",
+      "latitude": 14.63842,
+      "longitude": 121.0767,
+      "completeness": 0.794268,
+      "graded_windows": 197,
+      "knn_distance_km": 2.344562,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:4526989",
+      "latitude": 14.52917,
+      "longitude": 120.98988,
+      "completeness": 0.782595,
+      "graded_windows": 197,
+      "knn_distance_km": 6.020157,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:4565934",
+      "latitude": 14.6354,
+      "longitude": 121.0779,
+      "completeness": 0.967463,
+      "graded_windows": 2566,
+      "knn_distance_km": 2.170555,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:4795495",
+      "latitude": 14.63666,
+      "longitude": 120.96414,
+      "completeness": 0.70425,
+      "graded_windows": 141,
+      "knn_distance_km": 8.005934,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:4795497",
+      "latitude": 14.69397,
+      "longitude": 121.00919,
+      "completeness": 0.706803,
+      "graded_windows": 159,
+      "knn_distance_km": 4.532225,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "location_key": "openaq:4795499",
+      "latitude": 14.66916,
+      "longitude": 120.97576,
+      "completeness": 0.702919,
+      "graded_windows": 148,
+      "knn_distance_km": 4.532225,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "location_key": "openaq:4797638",
+      "latitude": 14.58655,
+      "longitude": 121.02549,
+      "completeness": 0.708306,
+      "graded_windows": 136,
+      "knn_distance_km": 3.477348,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:4797641",
+      "latitude": 14.56383,
+      "longitude": 121.05797,
+      "completeness": 0.702421,
+      "graded_windows": 166,
+      "knn_distance_km": 2.74665,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:4797642",
+      "latitude": 14.54848,
+      "longitude": 121.00053,
+      "completeness": 0.702532,
+      "graded_windows": 153,
+      "knn_distance_km": 3.73172,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:4797643",
+      "latitude": 14.54939,
+      "longitude": 121.07264,
+      "completeness": 0.703087,
+      "graded_windows": 136,
+      "knn_distance_km": 4.614395,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "location_key": "openaq:4797645",
+      "latitude": 14.56838,
+      "longitude": 121.02845,
+      "completeness": 0.700311,
+      "graded_windows": 136,
+      "knn_distance_km": 3.217007,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:4797647",
+      "latitude": 14.6341,
+      "longitude": 121.09803,
+      "completeness": 0.701754,
+      "graded_windows": 148,
+      "knn_distance_km": 2.344562,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "location_key": "openaq:4797649",
+      "latitude": 14.52904,
+      "longitude": 121.00472,
+      "completeness": 0.700644,
+      "graded_windows": 167,
+      "knn_distance_km": 5.065439,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:4797652",
+      "latitude": 14.71405,
+      "longitude": 121.00088,
+      "completeness": 0.702754,
+      "graded_windows": 165,
+      "knn_distance_km": 3.684369,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:4797660",
+      "latitude": 14.71071,
+      "longitude": 120.99545,
+      "completeness": 0.704974,
+      "graded_windows": 141,
+      "knn_distance_km": 4.22516,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "location_key": "openaq:4963739",
+      "latitude": 14.59083,
+      "longitude": 121.07037,
+      "completeness": 0.816561,
+      "graded_windows": 197,
+      "knn_distance_km": 3.285471,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "location_key": "openaq:5976206",
+      "latitude": 14.437546,
+      "longitude": 121.000088,
+      "completeness": 0.702599,
+      "graded_windows": 2098,
+      "knn_distance_km": 10.247242,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:6230501",
+      "latitude": 14.74595,
+      "longitude": 121.010146,
+      "completeness": 0.990424,
+      "graded_windows": 2687,
+      "knn_distance_km": 5.780778,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "location_key": "openaq:6340868",
+      "latitude": 14.676664,
+      "longitude": 121.095814,
+      "completeness": 0.989592,
+      "graded_windows": 1106,
+      "knn_distance_km": 4.976629,
+      "band": 2,
+      "density_band": "outer"
+    }
+  ],
+  "folds": [
+    {
+      "fold_id": 1,
+      "location_key": "openaq:3015285",
+      "latitude": 14.58853,
+      "longitude": 121.05822,
+      "completeness": 0.756333,
+      "graded_windows": 179,
+      "knn_distance_km": 2.74665,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "fold_id": 2,
+      "location_key": "openaq:3990425",
+      "latitude": 14.57863,
+      "longitude": 121.05675,
+      "completeness": 0.793924,
+      "graded_windows": 196,
+      "knn_distance_km": 1.997126,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "fold_id": 3,
+      "location_key": "openaq:4526988",
+      "latitude": 14.63842,
+      "longitude": 121.0767,
+      "completeness": 0.794268,
+      "graded_windows": 197,
+      "knn_distance_km": 2.344562,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "fold_id": 4,
+      "location_key": "openaq:4565934",
+      "latitude": 14.6354,
+      "longitude": 121.0779,
+      "completeness": 0.967463,
+      "graded_windows": 2566,
+      "knn_distance_km": 2.170555,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "fold_id": 5,
+      "location_key": "openaq:4797647",
+      "latitude": 14.6341,
+      "longitude": 121.09803,
+      "completeness": 0.701754,
+      "graded_windows": 148,
+      "knn_distance_km": 2.344562,
+      "band": 0,
+      "density_band": "core"
+    },
+    {
+      "fold_id": 6,
+      "location_key": "openaq:3370151",
+      "latitude": 14.58455,
+      "longitude": 121.01877,
+      "completeness": 0.802909,
+      "graded_windows": 196,
+      "knn_distance_km": 4.139832,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "fold_id": 7,
+      "location_key": "openaq:4797642",
+      "latitude": 14.54848,
+      "longitude": 121.00053,
+      "completeness": 0.702532,
+      "graded_windows": 153,
+      "knn_distance_km": 3.73172,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "fold_id": 8,
+      "location_key": "openaq:4797645",
+      "latitude": 14.56838,
+      "longitude": 121.02845,
+      "completeness": 0.700311,
+      "graded_windows": 136,
+      "knn_distance_km": 3.217007,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "fold_id": 9,
+      "location_key": "openaq:4797652",
+      "latitude": 14.71405,
+      "longitude": 121.00088,
+      "completeness": 0.702754,
+      "graded_windows": 165,
+      "knn_distance_km": 3.684369,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "fold_id": 10,
+      "location_key": "openaq:4963739",
+      "latitude": 14.59083,
+      "longitude": 121.07037,
+      "completeness": 0.816561,
+      "graded_windows": 197,
+      "knn_distance_km": 3.285471,
+      "band": 1,
+      "density_band": "inner"
+    },
+    {
+      "fold_id": 11,
+      "location_key": "openaq:4526987",
+      "latitude": 14.65744,
+      "longitude": 120.98362,
+      "completeness": 0.799687,
+      "graded_windows": 197,
+      "knn_distance_km": 4.905581,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "fold_id": 12,
+      "location_key": "openaq:4795499",
+      "latitude": 14.66916,
+      "longitude": 120.97576,
+      "completeness": 0.702919,
+      "graded_windows": 148,
+      "knn_distance_km": 4.532225,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "fold_id": 13,
+      "location_key": "openaq:4797643",
+      "latitude": 14.54939,
+      "longitude": 121.07264,
+      "completeness": 0.703087,
+      "graded_windows": 136,
+      "knn_distance_km": 4.614395,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "fold_id": 14,
+      "location_key": "openaq:4797660",
+      "latitude": 14.71071,
+      "longitude": 120.99545,
+      "completeness": 0.704974,
+      "graded_windows": 141,
+      "knn_distance_km": 4.22516,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "fold_id": 15,
+      "location_key": "openaq:6340868",
+      "latitude": 14.676664,
+      "longitude": 121.095814,
+      "completeness": 0.989592,
+      "graded_windows": 1106,
+      "knn_distance_km": 4.976629,
+      "band": 2,
+      "density_band": "outer"
+    },
+    {
+      "fold_id": 16,
+      "location_key": "openaq:3990426",
+      "latitude": 14.45627,
+      "longitude": 121.04569,
+      "completeness": 0.794574,
+      "graded_windows": 197,
+      "knn_distance_km": 10.090053,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "fold_id": 17,
+      "location_key": "openaq:4526989",
+      "latitude": 14.52917,
+      "longitude": 120.98988,
+      "completeness": 0.782595,
+      "graded_windows": 197,
+      "knn_distance_km": 6.020157,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "fold_id": 18,
+      "location_key": "openaq:4795495",
+      "latitude": 14.63666,
+      "longitude": 120.96414,
+      "completeness": 0.70425,
+      "graded_windows": 141,
+      "knn_distance_km": 8.005934,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "fold_id": 19,
+      "location_key": "openaq:4797649",
+      "latitude": 14.52904,
+      "longitude": 121.00472,
+      "completeness": 0.700644,
+      "graded_windows": 167,
+      "knn_distance_km": 5.065439,
+      "band": 3,
+      "density_band": "periphery"
+    },
+    {
+      "fold_id": 20,
+      "location_key": "openaq:5976206",
+      "latitude": 14.437546,
+      "longitude": 121.000088,
+      "completeness": 0.702599,
+      "graded_windows": 2098,
+      "knn_distance_km": 10.247242,
+      "band": 3,
+      "density_band": "periphery"
+    }
+  ]
+}

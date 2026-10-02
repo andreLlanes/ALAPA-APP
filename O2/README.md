@@ -35,7 +35,15 @@ O2/
      path bootstrap that pulls the column names and horizon from `O1/common`.
 3. **Folds** (`Folds/`) — `loso_fold.py` selects and freezes the twenty
    leave-one-station-out folds to `Folds/loso_folds.json`, which every other
-   script reads.
+   script reads. A station is eligible with at least 70% measured-hour
+   completeness and at least 100 usable windows in the test period; the twenty
+   are drawn five per density band (distance to the 3rd-nearest eligible
+   station) with seed 2026. LOSO is scored through regression-kriging, on the
+   withheld station's windows in the test period only (Section 4.7.3 holds the
+   test period fixed under LOSO), and the file records that period. The file
+   keeps two lists: `training_pool` (every station at ≥70% completeness; each
+   fold trains on all of them except the withheld one) and `eligible_stations`
+   (those that can also be scored, from which the folds are drawn).
 4. **Ablation** (`Ablation/`) — `main.py` writes the ablation manifest the
    trainers consume.
 
