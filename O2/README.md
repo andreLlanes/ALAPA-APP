@@ -8,6 +8,17 @@ baselines are scored on exactly the station-hour origins and the exact test
 period the forecasting models see, which is what makes the skill score a fair
 comparison.
 
+## Layout
+
+```
+O2/
+├── common/       shared by every stage: metrics.py, splits.py, ablation.py
+├── Baselines/    persistence.py, climatology.py, common_baseline.py, main.py
+├── Folds/        loso_fold.py and the frozen loso_folds.json
+├── Ablation/     main.py (writes the ablation manifest)
+└── Outputs/      results, one folder per baseline or stage (gitignored)
+```
+
 ## Stages
 
 1. **Common** (`common/`)
@@ -16,16 +27,17 @@ comparison.
      their numbers are always computed the same way.
    - `splits.py` — the chronological 70/15/15 partition of Section 4.7.3.
    - `ablation.py` — the training-data ablation block sampler of Section 4.7.5.
-2. **Baselines** (`Baselines/`) — naive references that require no training.
+2. **Baselines** (`Baselines/`) — naive references for the models.
    - `persistence.py` — carry the last observed concentration across the horizon.
+   - `climatology.py` — the station's training-period mean at each hour of day,
+     fitted per evaluation period; see *Climatology baseline* below.
    - `common_baseline.py` — shard discovery and per-station loading, plus the
      path bootstrap that pulls the column names and horizon from `O1/common`.
-3. **Ablation** (`Ablation/`) — `main.py` writes the ablation manifest the
+3. **Folds** (`Folds/`) — `loso_fold.py` selects and freezes the twenty
+   leave-one-station-out folds to `Folds/loso_folds.json`, which every other
+   script reads.
+4. **Ablation** (`Ablation/`) — `main.py` writes the ablation manifest the
    trainers consume.
-4. **Climatology** (`climatology_baseline.py`) — the hour-of-day climatology
-   baseline, fitted per evaluation period; see *Climatology baseline* below.
-5. **Folds** (`loso_fold.py`) — selects and freezes the twenty leave-one-station-out
-   folds to `folds/loso_folds.json`, which every other script reads.
 
 ## Data partitioning
 
@@ -35,16 +47,27 @@ normally run: they answer different questions.
 ### Chronological split (`--protocol fixed`)
 
 The record is split chronologically into training, validation, and test
-partitions in the proportions **70 / 15 / 15**. No shuffling is applied, so no
-sample from a later period informs a model evaluated on an earlier one. This is
-the partition leave-one-station-out holds fixed while it varies the station.
+partitions in the proportions **70 / 15 / 15 of the usable forecast windows**
+(not of calendar time). No shuffling is applied, so no sample from a later period
+informs a model evaluated on an earlier one. Counting windows matters because the
+Metro Manila network grew late: a 70% calendar cut would leave only about a third
+of the windows for training.
 
-Two details make the split safe to share across stations and models:
+Three details make the split safe to share across stations and models:
 
-- The cuts are computed once per (city, source) over **every station's origins
-  pooled together**, and the same two timestamps are applied to every station, so
-  all stations are scored on the same calendar period and fold-averaging compares
+- The cuts are computed once per city over **every station's origins pooled
+  together**, and the same two timestamps are applied to every station, so all
+  stations are scored on the same calendar period and fold-averaging compares
   like with like.
+- The cuts are **frozen** in `common/split_dates.json` (committed), so they cannot
+  move when stations are added or removed. Compute and freeze them with
+  `python O2/common/splits.py --city "Metro Manila"` (add `--dry-run` to only
+  print them); read them with `frozen_fixed_cuts(city)` and
+  `frozen_rolling_windows(city)`. Metro Manila: training up to 2025-12-28 17:00,
+  validation to 2026-02-22 19:00, test after (UTC).
+- A **72-hour purge gap** precedes each cut: a window's targets run 72 hours past
+  its origin, so training and validation windows must end before the next
+  partition begins. The windows in the gap are dropped and counted as `purged`.
 - The cuts fall on **timestamp boundaries, not sample indices**, so every window
   sharing an origin hour lands in the same partition and no two stations disagree
   about which side of a cut an hour is on. The realized proportions are therefore
@@ -61,9 +84,11 @@ origins** are used, so the evaluated periods together span twelve months and
 cover a full wet and dry cycle.
 
 Training is an **expanding window**, never a sliding one: each fold keeps all the
-history before its test period. The four test periods are consecutive and
-half-open, so they neither overlap nor leave an hour unscored, and no origin is
-ever in both the training and test side of the same fold.
+history before its test period. Within that history, the most recent **15%** of
+the windows is the fold's **validation** set, for early stopping, and the same
+72-hour purge gap separates training from validation and validation from test.
+The four test periods are consecutive and half-open, so they neither overlap nor
+leave an hour unscored, and no origin is ever in two parts of the same fold.
 
 Counts default to the manuscript's design but are adjustable with `--origins`
 and `--test-months`.
@@ -238,19 +263,19 @@ period.
 From the repository root:
 
 ```bash
-python O2/climatology_baseline.py --city "Metro Manila"            # main split + rolling origin
-python O2/climatology_baseline.py --city all --periods main
-python O2/climatology_baseline.py --train-end 2025-08-25T20:00 --test-start 2026-01-26T22:00
-python O2/climatology_baseline.py --no-persist                      # do not write to Postgres
+python O2/Baselines/climatology.py --city "Metro Manila"            # main split + rolling origin
+python O2/Baselines/climatology.py --city all --periods main
+python O2/Baselines/climatology.py --no-persist                      # do not write to Postgres
 ```
 
 The script reads the O1 table `MERGED_TABLE` (`openaq.merged_clean_v2`, set in
-`O1/common/schema.py`) and fits and scores climatology once per evaluation period:
+`O1/common/schema.py`) and fits and scores climatology once per evaluation period,
+using the frozen dates in `common/split_dates.json` (a city must be frozen first):
 
-- `main`: the 70/15/15 chronological split by calendar time. Pass `--train-end`
-  and `--test-start` to use frozen cut dates instead.
-- `ro_1` to `ro_4`: the rolling origin, four three-month test blocks ending at the
-  last record, each fitted on everything before its block.
+- `main`: fitted on the hours the training partition covers, scored on the test
+  partition's windows.
+- `ro_1` to `ro_4`: each fitted on its block's training hours and scored on its
+  three-month test block.
 
 Scoring follows the same rules as the models, so skill scores compare like with like:
 
@@ -263,9 +288,9 @@ Scoring follows the same rules as the models, so skill scores compare like with 
   each of the 72 lead times.
 - A station is scored only if it has at least 10 measured training hours at every
   hour of day, plus test windows.
-- Eligible stations come from the frozen fold file `O2/folds/loso_folds.json` when
+- Eligible stations come from the frozen fold file `O2/Folds/loso_folds.json` when
   it exists. Until then they are chosen by measured-hour completeness
-  (`--min-completeness`, default 0.90).
+  (`--min-completeness`, default 0.70).
 
 Outputs, under `O2/Outputs/climatology/<citySlug>/<period>/` (gitignored):
 `stations.csv` (per-station metrics), `by_lead.csv` (per station and lead),

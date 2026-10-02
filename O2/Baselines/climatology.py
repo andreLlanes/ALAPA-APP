@@ -7,12 +7,13 @@ PM2.5 at that hour of day,
     yhat_{t+l} = ybar_{h(t+l)},
 
 so it carries no information about current conditions and does not decay with
-the horizon. It is fitted and scored once per evaluation period:
+the horizon. It is fitted and scored once per evaluation period, using the dates
+frozen in O2/common/split_dates.json (see O2/common/splits.py):
 
-    main      - the 70/15/15 chronological split. Fitted on the training period,
-                scored on windows whose forecast origin lies in the test period.
-    ro_1..4   - the rolling origin: four three-month test blocks anchored to the
-                end of the record, each fitted on everything before its block.
+    main      - the 70/15/15 chronological split. Fitted on the hours the training
+                partition covers, scored on the test partition's windows.
+    ro_1..4   - the rolling origin. Each fitted on its block's training hours and
+                scored on its three-month test block.
 
 Scoring rules, shared with the models so the skill score of Eq. 4.21 compares
 like with like:
@@ -25,7 +26,7 @@ like with like:
       (Section 4.8.1), both overall and at each lead time.
     * A station is scored in a period only if it has training-period data for
       every hour of day (at least MIN_OBS_PER_HOUR each) and test windows.
-    * Eligible stations come from the frozen fold file (O2/folds/loso_folds.json)
+    * Eligible stations come from the frozen fold file (O2/Folds/loso_folds.json)
       when it exists, so every script uses the same stations; until then they are
       selected here by measured-hour completeness.
 
@@ -38,8 +39,8 @@ Outputs, under O2/Outputs/climatology/<citySlug>/<period>/:
 The fitted lookups are stored in Postgres (CLIMATOLOGY_TABLE), one version per
 (period, city), so a rerun replaces only its own rows.
 
-    python O2/climatology_baseline.py --city "Metro Manila"
-    python O2/climatology_baseline.py --city all --periods main
+    python O2/Baselines/climatology.py --city "Metro Manila"
+    python O2/Baselines/climatology.py --city all --periods main
 """
 
 from __future__ import annotations
@@ -53,10 +54,11 @@ import numpy as np
 import pandas as pd
 import psycopg2.extras
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_HERE)
+_HERE = os.path.dirname(os.path.abspath(__file__))   # O2/Baselines
+_O2_ROOT = os.path.dirname(_HERE)
+_REPO_ROOT = os.path.dirname(_O2_ROOT)
 for _p in (os.path.join(_REPO_ROOT, "O1", "Builders"),  # common_build also adds O1/common
-           os.path.join(_HERE, "common")):
+           os.path.join(_O2_ROOT, "common")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -64,56 +66,39 @@ from common_build import (  # noqa: E402  (path set just above)
     ALL_CITIES, CITY_SLUG, get_conn, load_station, station_keys,
 )
 from schema import (  # noqa: E402
-    HORIZON_H, LOOKBACK_H, MERGED_TABLE, PM25_COL, TIME_COL, exclusion_window_starts,
+    HORIZON_H, LOOKBACK_H, PM25_COL, TIME_COL, exclusion_window_starts,
 )
 from metrics import METRIC_NAMES, all_metrics  # noqa: E402
+from splits import (  # noqa: E402
+    frozen_fixed_cuts, frozen_rolling_windows, partition_mask, rolling_mask,
+)
 
 CLIMATOLOGY_TABLE = "openaq.climatology_v2"
-OUTPUT_ROOT = os.path.join(_HERE, "Outputs", "climatology")
-FOLD_FILE = os.path.join(_HERE, "folds", "loso_folds.json")
+OUTPUT_ROOT = os.path.join(_O2_ROOT, "Outputs", "climatology")
+FOLD_FILE = os.path.join(_O2_ROOT, "Folds", "loso_folds.json")
 
-TRAIN_FRAC = 0.70
-VAL_FRAC = 0.15
-ROLLING_ORIGINS = 4
-ROLLING_TEST_MONTHS = 3
 MIN_OBS_PER_HOUR = 10       # measured training hours needed at each hour of day
-MIN_COMPLETENESS = 0.90     # fallback only, used until the folds are frozen
+MIN_COMPLETENESS = 0.70     # fallback only, used until the folds are frozen
 
 
-def record_span(city):
-    """Return the first and last timestamp in a city's merged record."""
-    with get_conn().cursor() as cur:
-        cur.execute(f"SELECT MIN({TIME_COL}), MAX({TIME_COL}) FROM {MERGED_TABLE} "
-                    f"WHERE city = %s", (city,))
-        first, last = cur.fetchone()
-    if first is None:
-        raise ValueError(f"No rows for city={city!r} in {MERGED_TABLE}.")
-    return pd.Timestamp(first), pd.Timestamp(last)
+def evaluation_periods(city, which=("main", "rolling")):
+    """Return the periods to fit and score, from the city's frozen split dates.
 
-
-def evaluation_periods(city, which=("main", "rolling"), train_end=None, test_start=None):
-    """Return the periods to fit and score, as dicts with half-open date bounds.
-
-    The main split cuts calendar time 70/15/15 unless explicit dates are given,
-    which is how frozen cut dates are passed in. Rolling-origin blocks are laid
-    back from the end of the record, ROLLING_TEST_MONTHS each.
+    Each period carries ``fit_end`` (climatology is fitted on measured hours up to
+    and including it: the hours the training windows cover) and ``test_mask``, a
+    function selecting the test windows from an array of forecast origins.
     """
-    first, last = record_span(city)
-    end = last + pd.Timedelta(hours=1)
-    span = end - first
     periods = []
     if "main" in which:
-        t_end = pd.Timestamp(train_end, tz="UTC") if train_end else (first + span * TRAIN_FRAC).floor("h")
-        t_start = (pd.Timestamp(test_start, tz="UTC") if test_start
-                   else (first + span * (TRAIN_FRAC + VAL_FRAC)).floor("h"))
-        periods.append({"period": "main", "train_end": t_end,
-                        "test_start": t_start, "test_end": end})
+        cuts = frozen_fixed_cuts(city)
+        periods.append({"period": "main", "fit_end": cuts[0],
+                        "test_label": f"after {str(cuts[1])[:16]}",
+                        "test_mask": lambda o, c=cuts: partition_mask(o, c, "test")})
     if "rolling" in which:
-        edges = [end - pd.DateOffset(months=ROLLING_TEST_MONTHS * (ROLLING_ORIGINS - k))
-                 for k in range(ROLLING_ORIGINS + 1)]
-        for k in range(ROLLING_ORIGINS):
-            periods.append({"period": f"ro_{k + 1}", "train_end": edges[k],
-                            "test_start": edges[k], "test_end": edges[k + 1]})
+        for w in frozen_rolling_windows(city):
+            periods.append({"period": f"ro_{w['origin']}", "fit_end": w["val_start"],
+                            "test_label": f"{str(w['test_start'])[:10]}..{str(w['test_end'])[:10]}",
+                            "test_mask": lambda o, w=w: rolling_mask(o, w, "test")})
     return periods
 
 
@@ -136,14 +121,14 @@ def measured_completeness(g):
     return float(measured / active) if active > 0 else 0.0
 
 
-def fit_lookup(hours, values, measured, times, train_end):
+def fit_lookup(hours, values, measured, times, fit_end):
     """Return the 24-value hour-of-day lookup and per-hour counts, or (None, counts).
 
-    Fitted on measured training hours only. A station missing any hour of day
-    (fewer than MIN_OBS_PER_HOUR observations) gets no lookup, so it is never
-    scored on a partial set of hours.
+    Fitted on measured hours up to ``fit_end`` (naive UTC datetime64, like
+    ``times``). A station missing any hour of day (fewer than MIN_OBS_PER_HOUR
+    observations) gets no lookup, so it is never scored on a partial set of hours.
     """
-    use = measured & (times < train_end)
+    use = measured & (times <= fit_end)
     counts = np.bincount(hours[use], minlength=24)
     if (counts < MIN_OBS_PER_HOUR).any():
         return None, counts
@@ -155,9 +140,7 @@ def score_station(location_key, g, starts, lookup, period):
     """Score one station's test windows; return (overall row, per-lead rows, n)."""
     times = g[TIME_COL].dt.tz_convert(None).to_numpy()   # naive UTC datetime64
     origins = times[starts + LOOKBACK_H - 1]
-    lo = np.datetime64(period["test_start"].tz_convert(None))
-    hi = np.datetime64(period["test_end"].tz_convert(None))
-    sel = starts[(origins >= lo) & (origins < hi)]
+    sel = starts[period["test_mask"](origins)]
     if sel.size == 0:
         return None, [], 0
 
@@ -209,10 +192,9 @@ def station_average(frame):
     return {m: float(frame[m].mean()) for m in METRIC_NAMES} if len(frame) else {}
 
 
-def run_city(city, which, train_end=None, test_start=None, min_completeness=MIN_COMPLETENESS,
-             persist=True, fold_file=FOLD_FILE):
+def run_city(city, which, min_completeness=MIN_COMPLETENESS, persist=True, fold_file=FOLD_FILE):
     """Fit and score climatology for every requested period of one city."""
-    periods = evaluation_periods(city, which, train_end, test_start)
+    periods = evaluation_periods(city, which)
     eligible, folds = load_fold_file(fold_file)
     source = "fold file" if eligible is not None else f"completeness >= {min_completeness:.0%}"
 
@@ -234,12 +216,12 @@ def run_city(city, which, train_end=None, test_start=None, min_completeness=MIN_
         hours = g["hour"].to_numpy()
         values = g[PM25_COL].to_numpy(dtype=float)
         measured = ~np.isnan(values) & ~g["short_gap_filled"].fillna(False).to_numpy(dtype=bool)
-        times = g[TIME_COL]
+        times = g[TIME_COL].dt.tz_convert(None).to_numpy()   # naive UTC datetime64
         starts = exclusion_window_starts(g)
 
         for p in periods:
             res = results[p["period"]]
-            lookup, counts = fit_lookup(hours, values, measured, times, p["train_end"])
+            lookup, counts = fit_lookup(hours, values, measured, times, p["fit_end"])
             if lookup is None:
                 res["skipped"] += 1
                 continue
@@ -249,8 +231,9 @@ def run_city(city, which, train_end=None, test_start=None, min_completeness=MIN_
                 continue
             res["stations"].append(row)
             res["leads"].extend(leads)
+            fit_end = pd.Timestamp(p["fit_end"], tz="UTC").to_pydatetime()
             res["lookups"].extend(
-                (p["period"], city, key, h, float(lookup[h]), int(counts[h]), p["train_end"])
+                (p["period"], city, key, h, float(lookup[h]), int(counts[h]), fit_end)
                 for h in range(24))
 
     slug = CITY_SLUG.get(city, city.replace(" ", "-"))
@@ -264,8 +247,8 @@ def run_city(city, which, train_end=None, test_start=None, min_completeness=MIN_
         leads = pd.DataFrame(res["leads"])
         summary = {
             "city": city, "period": pid,
-            "train_end": str(p["train_end"]), "test_start": str(p["test_start"]),
-            "test_end": str(p["test_end"]), "station_source": source,
+            "fit_end": str(p["fit_end"]), "test": p["test_label"],
+            "split_dates": "O2/common/split_dates.json", "station_source": source,
             "stations_scored": int(len(stations)), "stations_skipped": res["skipped"],
             "windows": int(stations["n_windows"].sum()) if len(stations) else 0,
             "station_average": station_average(stations),
@@ -286,7 +269,7 @@ def run_city(city, which, train_end=None, test_start=None, min_completeness=MIN_
             persist_lookups(res["lookups"], city, pid)
 
         avg = summary["station_average"]
-        line = (f"  {pid:<5} test {p['test_start']:%Y-%m-%d}..{p['test_end']:%Y-%m-%d}  "
+        line = (f"  {pid:<5} test {p['test_label']:<22}  "
                 f"stations {summary['stations_scored']:3d} (skipped {res['skipped']:2d})  "
                 f"windows {summary['windows']:7d}")
         if avg:
@@ -299,8 +282,6 @@ def parse_args():
     p = argparse.ArgumentParser(description="Fit and score the climatology baseline.")
     p.add_argument("--city", default="Metro Manila", help='city name or "all"')
     p.add_argument("--periods", default="all", choices=["all", "main", "rolling"])
-    p.add_argument("--train-end", help="frozen training cutoff for the main split (UTC)")
-    p.add_argument("--test-start", help="frozen test start for the main split (UTC)")
     p.add_argument("--min-completeness", type=float, default=MIN_COMPLETENESS,
                    help="used only until the fold file exists")
     p.add_argument("--fold-file", default=FOLD_FILE)
@@ -314,7 +295,7 @@ def main():
     which = ("main", "rolling") if args.periods == "all" else (args.periods,)
     cities = ALL_CITIES if args.city == "all" else [args.city]
     for city in cities:
-        run_city(city, which, args.train_end, args.test_start, args.min_completeness,
+        run_city(city, which, args.min_completeness,
                  persist=not args.no_persist, fold_file=args.fold_file)
 
 

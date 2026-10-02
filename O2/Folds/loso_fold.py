@@ -34,8 +34,10 @@ changing the folds invalidates every result already scored on them.
 Temporal partitioning (the 70/15/15 split and the rolling origin) lives in
 O2/common/splits.py and is not repeated here.
 
-    python O2/loso_fold.py                      # select from the database, freeze
-    python O2/loso_fold.py --demo --out demo.json   # synthetic stations, no database
+    python O2/Folds/loso_fold.py                      # select from the database, freeze
+    python O2/Folds/loso_fold.py --demo --out demo.json   # synthetic stations, no database
+
+The frozen file is written next to this script, as O2/Folds/loso_folds.json.
 """
 
 from __future__ import annotations
@@ -50,8 +52,8 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.dirname(_HERE)
+_HERE = os.path.dirname(os.path.abspath(__file__))   # O2/Folds
+_REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "O1", "common"))
 
@@ -59,7 +61,7 @@ from schema import MASKED_TABLE  # noqa: E402  (path set just above)
 
 SOURCE_TABLE = MASKED_TABLE
 CITY = "Metro Manila"
-DEFAULT_OUT = os.path.join(_HERE, "folds", "loso_folds.json")
+DEFAULT_OUT = os.path.join(_HERE, "loso_folds.json")
 
 N_FOLDS = 20
 COMPLETENESS_MIN = 0.90  # Section 4.3.1; matches O1/Clean/common_preprocess.py
