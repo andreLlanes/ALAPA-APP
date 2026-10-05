@@ -1,44 +1,67 @@
-# O2 — Climatology baseline
+# O2: PM2.5 forecasting (LSTM, GNN, GBT) with transfer learning
 
-This folder contains the climatology baseline used for PM2.5 forecasting.
+Forecasts 72 hours of PM2.5 from a 72-hour lookback, for Metro Manila (`mm`), Bangkok (`bk`) and Los Angeles (`la`).
 
-The baseline follows the standard formulation:
+## Setup
 
-$$
-\hat{y}_{t+\ell} = \bar{y}_{h(t+\ell)}
-$$
+Put `.env` at the repo root with `PG_DSN` (or `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`).
 
-where $$h(t + \ell)$$ is the target hour-of-day and $$\bar{y}_h$$ is the historical
-mean PM2.5 concentration for that same station and hour-of-day from the training
-period.
+Run everything from inside `O2/`, with `PYTHONPATH=..` so `Common/` is importable.
 
-## Usage
+## Run
 
-From the repository root:
-
-```bash
-python O2/climatology_baseline.py --city "Metro Manila"
-python O2/climatology_baseline.py --city all --output-table openaq.climatology_baseline
-python O2/climatology_baseline.py --city all --start-date 2023-01-01 --end-date 2026-01-01
+```
+PYTHONPATH=.. python -m data.database                        # copy the database (once)
+PYTHONPATH=.. python train.py --model lstm --city mm         # tune, train, score, compare
+PYTHONPATH=.. python train.py --model gnn --city mm --transfer true --source bk
+PYTHONPATH=.. python -m evals.eval                           # compare everything trained
+PYTHONPATH=.. python -m tuning.loso_fold                     # select the 20 LOSO stations (once)
 ```
 
-The script reads from the O1 pipeline table `openaq.merged_clean` by default.
-It applies a chronological 70/15/15 train/validation/test split, keeps stations
-with at least 90% hourly completeness across their observed lifespan, and fits
-the lookup table on the training partition only. Use `--start-date`, `--end-date`,
-`--min-completeness`, `--train-fraction`, and `--validation-fraction` to override
-these defaults. Pass `--no-evaluate` when only the persisted lookup is needed.
+After the database changes: `PYTHONPATH=.. python -m data.database --refresh`, then delete `artifacts/`.
 
-Validation and test scores use the same 72-hour lookback plus 72-hour forecast
-window as O1 model datasets. The script reports RMSE, MAE, index of agreement
-(IOA), and $R^2$ for complete windows only.
+## Arguments (`train.py`)
 
-The fitted climatology is stored as a compact lookup table keyed by:
+| Argument | Values | Default |
+|---|---|---|
+| `--model` | lstm, gnn, gbt | required |
+| `--city` | mm, bk, la | required |
+| `--transfer` | true, false | false |
+| `--source` | mm, bk, la (not the city) | required with transfer |
+| `--training-variant` | LSTM/GNN: frozen, full, all · GBT: pooled, weighted, all | all |
+| `--autoregressive` | true, false | false |
+| `--longest-gap` | 0–12 | 6 |
+| `--completeness` | 0, 25, 50, 70, 90 | 70 |
+| `--data-ablation` | 25, 50, 75, 100 | 100 |
+| `--block` | 0, 1, 2, all | all |
+| `--seed` | e.g. 42,1234,2026 | 42,1234,2026 |
+| `--device` | cpu, cuda | cpu |
 
-- `city`
-- `location_key`
-- `hour_of_day`
-- `climatology_pm25`
+## Key details
 
-This is lightweight and robust for benchmarking against more recent models such
-as persistence, SARIMA, or deep-learning approaches.
+- **Data:** the database is copied to `data/cache/` once; every run reads that copy. Windows are filtered (completeness, then longest lookback gap), then split 70/15/15 by window count with a 72h purge. No fixed dates.
+- **Gaps:** lookback gaps are interpolated within the window; windows with any missing forecast hour are dropped.
+- **LOSO stations** (`loso_stations.json`) are never removed by the completeness filter.
+- **Tuning:** grid search on validation RMSE (`grid_tuning.json`). Hyperparameters are shared across seeds (tuned with the first seed, whose winning model is reused) but never across settings: every model, city, transfer variant, gap, completeness and ablation block tunes its own.
+- **Transfer (LSTM/GNN):** parameter transfer and MMD-aligned pretraining on the source, each fine-tuned frozen (encoder fixed) and/or full. Fine-tuning starts at teacher forcing 0.
+- **Transfer (GBT):** target plus source windows, either *pooled* (every source window weighs 1) or *weighted* (each source station by exp(−d/τ), from its MMD distance to the target). τ is tuned with the tree settings, separately for every source-target pair.
+- **Directions:** any city can be the source or the target (e.g. `--city bk --source mm`). Runs can be done in any order.
+- **Baselines:** persistence and climatology run automatically after training, on the same test windows.
+- **Scoring:** metrics per station, then averaged with equal weight over stations with at least 100 test windows; reported overall and for seen/unseen stations, with a Holm-adjusted paired Wilcoxon test against the best row.
+- **Resuming:** rerunning a command skips finished seeds and grid points and resumes interrupted training (except MMD-aligned pretraining, which restarts).
+- **Settings:** all fixed settings live in `config.py`; tuned ones in `grid_tuning.json`.
+
+## Outputs
+
+```
+artifacts/<model>/<city or source-city>/<ar|direct>_<settings>/<variant>/seed<n>/
+    predictions.npz  stations.csv  by_lead.csv  lead_curve.csv  metrics.json  params.json
+artifacts/baselines/<persistence|climatology>/<city>/<settings>/test/
+artifacts/comparison.csv
+artifacts/logs/<time>_<model>_<city>_<settings>.txt   one log per train.py run
+```
+
+Each log holds everything printed, plus: the command, arguments, config and library versions;
+station completeness, filters, split and normalization for every city loaded; every tuning point's
+training history; pretraining and fine-tuning histories (with MMD per epoch); GBT per-model scores;
+each source station's distance and weight; and per-station test scores.

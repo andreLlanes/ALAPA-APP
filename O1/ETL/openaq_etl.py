@@ -1,15 +1,15 @@
-"""Load OpenAQ ground-station PM2.5 into Postgres for the three study cities.
+""" Load OpenAQ ground-station PM2.5 into Postgres for the three study cities.
 
-Source is the OpenAQ v3 API. Per city, locations inside a bounding box are
-discovered, their sensors filtered to PM2.5, and each sensor's hourly series
-(/sensors/{id}/hours) is fetched in date chunks and upserted. Fetching and
-upserting happen per (city, sensor, date-chunk) and commit immediately; each
-completed unit is appended to a text ledger, so a stopped run resumes by skipping
-ledger entries rather than re-reading the database.
+    Source is the OpenAQ v3 API. Per city, locations inside a bounding box are
+    discovered, their sensors filtered to PM2.5, and each sensor's hourly series
+    (/sensors/{id}/hours) is fetched in date chunks and upserted. Fetching and
+    upserting happen per (city, sensor, date-chunk) and commit immediately; each
+    completed unit is appended to a text ledger, so a stopped run resumes by skipping
+    ledger entries rather than re-reading the database.
 
-A sliding-window rate limiter enforces the registered-key caps. Tuning and table
-names are constants below; only the OpenAQ API key and Postgres connection come
-from the environment (OPENAQ_API_KEY, PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
+    A sliding-window rate limiter enforces the registered-key caps. Tuning and table
+    names are constants below; only the OpenAQ API key and Postgres connection come
+    from the environment (OPENAQ_API_KEY, PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
 """
 
 import os
@@ -17,6 +17,7 @@ import csv
 import time
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -70,19 +71,23 @@ MEASUREMENT_COLUMNS = ["pm25"]
 
 
 class OpenAQAuthError(Exception):
-    """Raised on 401/403 (invalid or expired API key); not retried."""
+    """ Raised on 401/403 (invalid or expired API key); not retried.
+    """
 
 
 class RateLimited(Exception):
-    """Raised on a 429 whose Retry-After exceeds the wait cap; stops the run."""
+    """ Raised on a 429 whose Retry-After exceeds the wait cap; stops the run.
+    """
 
 
 class RequestTimeout(Exception):
-    """Raised on a 408 so the caller can split the date window and retry."""
+    """ Raised on a 408 so the caller can split the date window and retry.
+    """
 
 
 class RateLimiter:
-    """Sliding-window limiter enforcing per-minute and per-hour request caps."""
+    """ Sliding-window limiter enforcing per-minute and per-hour request caps.
+    """
 
     def __init__(self, per_minute, per_hour):
         self.windows = []
@@ -93,7 +98,8 @@ class RateLimiter:
         self.calls = []
 
     def acquire(self):
-        """Block until a request may be sent without breaching any window."""
+        """ Block until a request may be sent without breaching any window.
+        """
         if not self.windows:
             return
         max_span = max(s for s, _, _ in self.windows)
@@ -133,11 +139,11 @@ if API_KEY:
 
 
 def request_json(url, params=None):
-    """GET a URL through the rate limiter and return the parsed JSON body.
+    """ GET a URL through the rate limiter and return the parsed JSON body.
 
-    Retries transient transport and 5xx errors with backoff; treats 400/422 as
-    empty results; raises OpenAQAuthError (401/403), RateLimited (429 with a long
-    Retry-After), or RequestTimeout (408) for the caller to handle.
+        Retries transient transport and 5xx errors with backoff; treats 400/422 as
+        empty results; raises OpenAQAuthError (401/403), RateLimited (429 with a long
+        Retry-After), or RequestTimeout (408) for the caller to handle.
     """
     attempt = 0
     while True:
@@ -199,7 +205,8 @@ def request_json(url, params=None):
 
 
 def load_ledger():
-    """Return the set of completed (city, sensor_id, chunk_start, chunk_end)."""
+    """ Return the set of completed (city, sensor_id, chunk_start, chunk_end).
+    """
     done = set()
     if not os.path.exists(LEDGER_PATH):
         return done
@@ -211,13 +218,15 @@ def load_ledger():
 
 
 def append_ledger(city, sensor_id, chunk_start, chunk_end):
-    """Record one completed (city, sensor, date-chunk) in the ledger."""
+    """ Record one completed (city, sensor, date-chunk) in the ledger.
+    """
     with open(LEDGER_PATH, "a", newline="") as f:
         csv.writer(f).writerow([city, sensor_id, chunk_start, chunk_end])
 
 
 def fetch_city_locations(city, bbox):
-    """Page through OpenAQ locations in a bbox, keeping those inside it."""
+    """ Page through OpenAQ locations in a bbox, keeping those inside it.
+    """
     locations = []
     page = 1
     while True:
@@ -240,13 +249,14 @@ def fetch_city_locations(city, bbox):
 
 
 def build_locations_frame(city, locations):
-    """Flatten OpenAQ location objects into a station-metadata DataFrame."""
+    """ Flatten OpenAQ location objects into a station-metadata DataFrame.
+    """
     rows = []
     for loc in locations:
         loc_id = loc.get("id")
         coords = loc.get("coordinates") or {}
         rows.append({
-            "location_key": f"openaq:{loc_id}",
+            "location_key": f"openaq-{loc_id}",
             "source": "openaq",
             "external_id": str(loc_id),
             "name": loc.get("name"),
@@ -264,7 +274,8 @@ def build_locations_frame(city, locations):
 
 
 def location_history_start(loc, fallback_start):
-    """Clamp the fetch start to when the location first reported, if later."""
+    """ Clamp the fetch start to when the location first reported, if later.
+    """
     dt_first = (loc.get("datetimeFirst") or {}).get("utc")
     if not dt_first:
         return fallback_start
@@ -275,10 +286,10 @@ def location_history_start(loc, fallback_start):
 
 
 def fetch_sensor_chunk(sensor_id, dt_from, dt_to):
-    """Fetch a sensor's hourly rows for a date window, paging through results.
+    """ Fetch a sensor's hourly rows for a date window, paging through results.
 
-    On a 408 timeout the window is bisected and each half fetched recursively,
-    down to MIN_SPLIT_SPAN; a window that still times out at the floor is skipped.
+        On a 408 timeout the window is bisected and each half fetched recursively,
+        down to MIN_SPLIT_SPAN; a window that still times out at the floor is skipped.
     """
     try:
         rows = []
@@ -305,7 +316,8 @@ def fetch_sensor_chunk(sensor_id, dt_from, dt_to):
 
 
 def _extract_utc(r):
-    """Pull a UTC timestamp string from a measurement row across v3 shapes."""
+    """ Pull a UTC timestamp string from a measurement row across v3 shapes.
+    """
     period = r.get("period") or {}
     for key in ("datetimeTo", "datetimeFrom"):
         d = period.get(key)
@@ -321,7 +333,8 @@ def _extract_utc(r):
 
 
 def _extract_param(r):
-    """Pull the lowercase parameter name from a measurement row."""
+    """ Pull the lowercase parameter name from a measurement row.
+    """
     p = r.get("parameter")
     if isinstance(p, dict):
         return (p.get("name") or "").lower()
@@ -331,11 +344,11 @@ def _extract_param(r):
 
 
 def normalize_measurements(rows, location_id, city):
-    """Turn raw sensor rows into an hourly, wide, PM2.5-only measurement frame.
+    """ Turn raw sensor rows into an hourly, wide, PM2.5-only measurement frame.
 
-    Timestamps are floored to the hour and duplicate station-hours averaged;
-    parameters outside PARAMETER_MAP are dropped. Returns an empty frame if
-    nothing valid remains.
+        Timestamps are floored to the hour and duplicate station-hours averaged;
+        parameters outside PARAMETER_MAP are dropped. Returns an empty frame if
+        nothing valid remains.
     """
     records = []
     for r in rows:
@@ -366,13 +379,14 @@ def normalize_measurements(rows, location_id, city):
     for col in MEASUREMENT_COLUMNS:
         if col not in pivot.columns:
             pivot[col] = pd.NA
-    pivot["location_key"] = pivot["location_id"].apply(lambda v: f"openaq:{v}")
+    pivot["location_key"] = pivot["location_id"].apply(lambda v: f"openaq-{v}")
     pivot["city"] = city
     return pivot
 
 
 def _date_chunks(start, end):
-    """Yield (start, end) sub-windows of at most CHUNK_DAYS across [start, end)."""
+    """ Yield (start, end) sub-windows of at most CHUNK_DAYS across [start, end).
+    """
     cur = start
     while cur < end:
         nxt = min(cur + timedelta(days=CHUNK_DAYS), end)
@@ -381,11 +395,11 @@ def _date_chunks(start, end):
 
 
 def fetch_and_store_city(city, bbox, start_date, end_date, done):
-    """Discover a city's PM2.5 sensors and stream each date-chunk to Postgres.
+    """ Discover a city's PM2.5 sensors and stream each date-chunk to Postgres.
 
-    Skips ledger-recorded chunks; a chunk whose fetch exhausts its retries is
-    left unlogged so a later run retries it. Clamps each sensor's start to its
-    first reporting time.
+        Skips ledger-recorded chunks; a chunk whose fetch exhausts its retries is
+        left unlogged so a later run retries it. Clamps each sensor's start to its
+        first reporting time.
     """
     print(f"{city}: discovering locations in bbox {bbox}")
     locations = fetch_city_locations(city, bbox)
@@ -432,7 +446,8 @@ def fetch_and_store_city(city, bbox, start_date, end_date, done):
 
 
 def resolve_pg_dsn():
-    """Build the Postgres DSN from PG_DSN, or from the PG_* component vars."""
+    """ Build the Postgres DSN from PG_DSN, or from the PG_* component vars.
+    """
     dsn = os.environ.get("PG_DSN")
     if dsn:
         return dsn
@@ -451,7 +466,8 @@ _CONN = None
 
 
 def get_conn():
-    """Return a live connection, reconnecting if the previous one has dropped."""
+    """ Return a live connection, reconnecting if the previous one has dropped.
+    """
     global _CONN, _PG_DSN
     if _PG_DSN is None:
         _PG_DSN = resolve_pg_dsn()
@@ -472,7 +488,8 @@ def get_conn():
 
 
 def _safe_rollback(conn):
-    """Roll back without raising if the connection is already broken."""
+    """ Roll back without raising if the connection is already broken.
+    """
     try:
         conn.rollback()
     except psycopg2.Error:
@@ -480,17 +497,21 @@ def _safe_rollback(conn):
 
 
 def _na_to_none(v):
-    """Map pandas NA/NaN to None so psycopg2 writes SQL NULL."""
+    """ Map pandas NA/NaN to None so psycopg2 writes SQL NULL.
+    """
     try:
         if v is None or pd.isna(v):
             return None
     except (TypeError, ValueError):
         pass
+    if isinstance(v, np.generic):
+        return v.item()
     return v
 
 
 def upsert_locations(df):
-    """Upsert station metadata into the locations table, chunked, with PostGIS geom."""
+    """ Upsert station metadata into the locations table, chunked, with PostGIS geom.
+    """
     if df.empty:
         return
     conn = get_conn()
@@ -539,7 +560,8 @@ def upsert_locations(df):
 
 
 def store_chunk(df):
-    """Upsert one sensor-chunk's PM2.5 rows into the measurements table."""
+    """ Upsert one sensor-chunk's PM2.5 rows into the measurements table.
+    """
     conn = get_conn()
     if df.empty:
         conn.commit()
@@ -578,7 +600,8 @@ def store_chunk(df):
 
 
 def main():
-    """Run the backfill for every city, resuming from the ledger."""
+    """ Run the backfill for every city, resuming from the ledger.
+    """
     if not API_KEY:
         raise ValueError("OPENAQ_API_KEY is required in the environment.")
     done = load_ledger()

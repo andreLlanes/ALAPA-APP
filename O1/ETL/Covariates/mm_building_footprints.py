@@ -1,16 +1,15 @@
-"""
-Building footprints for Metro Manila from OpenStreetMap via the Overpass API.
+""" Building footprints for Metro Manila from OpenStreetMap via the Overpass API.
 
-Bounding box (min_lat, min_lon, max_lat, max_lon) = (14.34, 120.93, 14.78, 121.15).
+    Bounding box (min_lat, min_lon, max_lat, max_lon) = (14.34, 120.93, 14.78, 121.15).
 
-The box is split into a grid of small tiles; each tile is queried, cached to its
-own file, and stitched into a single GeoDataFrame. A stopped run resumes by
-loading already-cached tiles instead of re-querying them. Tiles are processed one
-at a time and each tile's raw JSON is discarded after parsing, so peak memory is
-one tile of JSON plus the accumulating polygon list.
+    The box is split into a grid of small tiles; each tile is queried, cached to its
+    own file, and stitched into a single GeoDataFrame. A stopped run resumes by
+    loading already-cached tiles instead of re-querying them. Tiles are processed one
+    at a time and each tile's raw JSON is discarded after parsing, so peak memory is
+    one tile of JSON plus the accumulating polygon list.
 
-Output is a GeoJSON of building polygons in EPSG:4326 with osm_id, name, and
-building type.
+    Output is a GeoJSON of building polygons in EPSG:4326 with osm_id, name, and
+    building type.
 """
 
 import json
@@ -43,7 +42,8 @@ SLEEP_BETWEEN_TILES = float(os.environ.get("BLDG_SLEEP_BETWEEN", "2"))
 
 
 def frange(start, stop, step):
-    """Inclusive-ish float range; last tile is clamped to `stop` by the caller."""
+    """ Inclusive-ish float range; last tile is clamped to `stop` by the caller.
+    """
     v = start
     while v < stop - 1e-9:
         yield v
@@ -51,7 +51,8 @@ def frange(start, stop, step):
 
 
 def build_tiles(bbox, step):
-    """Split (min_lat, min_lon, max_lat, max_lon) into a list of sub-bboxes."""
+    """ Split (min_lat, min_lon, max_lat, max_lon) into a list of sub-bboxes.
+    """
     min_lat, min_lon, max_lat, max_lon = bbox
     tiles = []
     for lat0 in frange(min_lat, max_lat, step):
@@ -64,13 +65,16 @@ def build_tiles(bbox, step):
 
 
 def tile_cache_path(tile):
+    """ Return the on-disk cache path for one tile's Overpass building JSON.
+    """
     lat0, lon0, lat1, lon1 = tile
     name = f"tile_{lat0}_{lon0}_{lat1}_{lon1}.json".replace("-", "m")
     return os.path.join(CACHE_DIR, name)
 
 
 def overpass_query(tile):
-    """Overpass QL for all buildings in one tile. bbox order is (S, W, N, E)."""
+    """ Overpass QL for all buildings in one tile. bbox order is (S, W, N, E).
+    """
     lat0, lon0, lat1, lon1 = tile
     return f"""
 [out:json][timeout:{QUERY_TIMEOUT}];
@@ -80,10 +84,10 @@ out geom;
 
 
 def fetch_tile(tile):
-    """Return the tile's Overpass JSON, from cache if present, else live with retry.
+    """ Return the tile's Overpass JSON, from cache if present, else live with retry.
 
-    Cached tiles are read straight off disk. Live queries rotate through the
-    endpoint list and back off exponentially on failure / HTTP 429 / 504.
+        Cached tiles are read straight off disk. Live queries rotate through the
+        endpoint list and back off exponentially on failure / HTTP 429 / 504.
     """
     cache_path = tile_cache_path(tile)
     if os.path.exists(cache_path):
@@ -118,7 +122,8 @@ def fetch_tile(tile):
 
 
 def polygons_from_json(bldg_json):
-    """Stitch each way's vertices into a Polygon record. Skips degenerate ways."""
+    """ Stitch each way's vertices into a Polygon record. Skips degenerate ways.
+    """
     records = []
     for el in bldg_json.get("elements", []):
         if el.get("type") == "way" and "geometry" in el:
@@ -135,6 +140,9 @@ def polygons_from_json(bldg_json):
 
 
 def main():
+    """ Fetch building footprints tile by tile (deduplicated by OSM id) and write them
+        to a single GeoJSON.
+    """
     tiles = build_tiles(MM_BBOX, TILE_STEP_DEG)
     print(f"Metro Manila bbox {MM_BBOX} split into {len(tiles)} tiles "
           f"of {TILE_STEP_DEG}° each")

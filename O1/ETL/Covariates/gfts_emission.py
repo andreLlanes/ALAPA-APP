@@ -1,31 +1,30 @@
-"""
-GTFS transit-intensity emission surfaces for Metro Manila, on the study's common
-100 m grid (Section: GTFS Transit Intensity Surface).
+""" GTFS transit-intensity emission surfaces for Metro Manila, on the study's common
+    100 m grid (Section: GTFS Transit Intensity Surface).
 
-Produces four per-band relative-emission rasters (AM peak, midday, PM peak, night)
-aligned cell-for-cell with the building-fraction and other covariate layers, so the
-whole stack shares one grid for regression kriging.
+    Produces four per-band relative-emission rasters (AM peak, midday, PM peak, night)
+    aligned cell-for-cell with the building-fraction and other covariate layers, so the
+    whole stack shares one grid for regression kriging.
 
-Method:
-  - Keep only road public transport: jeepney (PUJ) and bus (PUB) routes. Rail
-    (LRT/MRT/PNR, route_type 2) is excluded.
-  - Four service bands: AM 06-09, midday 09-16, PM 16-19, night 19-06.
-  - Per band, each route's dispatch frequency f_b = 3600 / headway_secs (veh/hr),
-    averaged over the band weighted by temporal overlap with the band window.
-  - Fixed relative emission weights: E_jeep = 1.0, E_bus = 3.64.
-  - Per cell i and band b: E_hat = E_bus * F_bus + E_jeep * F_jeep, where F is the
-    frequency-weighted total of overlapping routes of each type in that cell.
-  - Near-road dispersion: each band surface is convolved with a radial exponential
-    decay kernel exp(-r / lambda), lambda = 1/0.0026 m ~= 385 m (the black-carbon
-    near-road decay rate from a published meta-analysis, used as an exhaust proxy
-    because PM2.5 has no sharp published gradient). The kernel is truncated at 3
-    lambda and mass-conserving, so emission spreads off the road with exponential
-    falloff rather than sitting only on the centreline. Override the rate via
-    GTFS_DECAY_RATE. Set GTFS_DECAY_RATE very high to effectively disable.
+    Method:
+      - Keep only road public transport: jeepney (PUJ) and bus (PUB) routes. Rail
+        (LRT/MRT/PNR, route_type 2) is excluded.
+      - Four service bands: AM 06-09, midday 09-16, PM 16-19, night 19-06.
+      - Per band, each route's dispatch frequency f_b = 3600 / headway_secs (veh/hr),
+        averaged over the band weighted by temporal overlap with the band window.
+      - Fixed relative emission weights: E_jeep = 1.0, E_bus = 3.64.
+      - Per cell i and band b: E_hat = E_bus * F_bus + E_jeep * F_jeep, where F is the
+        frequency-weighted total of overlapping routes of each type in that cell.
+      - Near-road dispersion: each band surface is convolved with a radial exponential
+        decay kernel exp(-r / lambda), lambda = 1/0.0026 m ~= 385 m (the black-carbon
+        near-road decay rate from a published meta-analysis, used as an exhaust proxy
+        because PM2.5 has no sharp published gradient). The kernel is truncated at 3
+        lambda and mass-conserving, so emission spreads off the road with exponential
+        falloff rather than sitting only on the centreline. Override the rate via
+        GTFS_DECAY_RATE. Set GTFS_DECAY_RATE very high to effectively disable.
 
-Route geometry is built from stop_times sequence order as the union of all
-distinct trip paths per route; emission is assigned once per covered cell.
-Output is a 4-band GeoTIFF in EPSG:32651 on the common grid.
+    Route geometry is built from stop_times sequence order as the union of all
+    distinct trip paths per route; emission is assigned once per covered cell.
+    Output is a 4-band GeoTIFF in EPSG:32651 on the common grid.
 """
 
 import os
@@ -66,16 +65,21 @@ NIGHT_EXTRA = (0, 6 * 3600)
 
 
 def gtfs_secs(t):
+    """ Parse a GTFS HH:MM:SS time (hours may exceed 24) into seconds since midnight.
+    """
     h, m, s = map(int, str(t).split(":"))
     return h * 3600 + m * 60 + s
 
 
 def overlap(a0, a1, b0, b1):
+    """ Return the length of the overlap between intervals [a0, a1) and [b0, b1).
+    """
     return max(0, min(a1, b1) - max(a0, b0))
 
 
 def classify(route_id):
-    """Jeepney (PUJ) or bus (PUB) from the route_id; None for rail/other."""
+    """ Jeepney (PUJ) or bus (PUB) from the route_id; None for rail/other.
+    """
     rid = str(route_id).upper()
     if "PUJ" in rid:
         return "jeep"
@@ -85,6 +89,8 @@ def classify(route_id):
 
 
 def load_routes():
+    """ Load routes.txt and keep only jeepney/bus routes, tagging each with veh_class.
+    """
     routes = pd.read_csv(os.path.join(GTFS_DIR, "routes.txt"))
     routes["veh_class"] = routes["route_id"].map(classify)
     kept = routes[routes["veh_class"].notna()].copy()
@@ -96,7 +102,8 @@ def load_routes():
 
 
 def build_route_band(routes_kept):
-    """Per-(route, band) frequency-weighted emission."""
+    """ Per-(route, band) frequency-weighted emission.
+    """
     trips = pd.read_csv(os.path.join(GTFS_DIR, "trips.txt"))
     frequencies = pd.read_csv(os.path.join(GTFS_DIR, "frequencies.txt"))
 
@@ -134,13 +141,13 @@ def build_route_band(routes_kept):
 
 
 def build_route_lines(routes_kept):
-    """Route geometry as the union of all distinct trip paths per route.
+    """ Route geometry as the union of all distinct trip paths per route.
 
-    Paths are built from stop_times sequence order. Every distinct stop-sequence
-    a route runs is turned into a line, so together they cover every street
-    segment the route uses. Emission is assigned once per covered cell, so
-    unioning widens coverage without inflating magnitude. Returns one row per
-    (route_id, distinct-path) line.
+        Paths are built from stop_times sequence order. Every distinct stop-sequence
+        a route runs is turned into a line, so together they cover every street
+        segment the route uses. Emission is assigned once per covered cell, so
+        unioning widens coverage without inflating magnitude. Returns one row per
+        (route_id, distinct-path) line.
     """
     trips = pd.read_csv(os.path.join(GTFS_DIR, "trips.txt"))
     stops = pd.read_csv(os.path.join(GTFS_DIR, "stops.txt"))
@@ -171,12 +178,12 @@ def build_route_lines(routes_kept):
 
 
 def cell_index_for_lines(route_gdf):
-    """Map each route to the deduplicated set of grid cells its paths intersect.
+    """ Map each route to the deduplicated set of grid cells its paths intersect.
 
-    All of a route's path-lines are burned together and the touched cells
-    deduplicated, so a cell covered by two paths of the same route is counted
-    once. Emission is assigned per route per cell, not per path, which prevents
-    double-counting.
+        All of a route's path-lines are burned together and the touched cells
+        deduplicated, so a cell covered by two paths of the same route is counted
+        once. Emission is assigned per route per cell, not per path, which prevents
+        double-counting.
     """
     route_to_cells = {}
     for route_id, grp in route_gdf.groupby("route_id"):
@@ -191,7 +198,8 @@ def cell_index_for_lines(route_gdf):
 
 
 def build_surfaces(route_band, route_to_cells):
-    """Accumulate E_hat per cell per band onto the common grid."""
+    """ Accumulate E_hat per cell per band onto the common grid.
+    """
     surfaces = {b: np.zeros((NROWS, NCOLS), dtype="float32") for b in BANDS}
     for band in BANDS:
         rb = route_band[route_band["band"] == band].set_index("route_id")["emis"]
@@ -207,6 +215,9 @@ def build_surfaces(route_band, route_to_cells):
 
 
 def decay_kernel():
+    """ Build the mass-conserving radial exp(-r/lambda) dispersion kernel (truncated at
+        KERNEL_TRUNC*lambda, normalized to sum 1).
+    """
     radius_cells = int(np.ceil(KERNEL_TRUNC * DECAY_LAMBDA / CELL))
     offs = np.arange(-radius_cells, radius_cells + 1)
     dy, dx = np.meshgrid(offs, offs, indexing="ij")
@@ -218,6 +229,9 @@ def decay_kernel():
 
 
 def apply_decay(surfaces):
+    """ Convolve each band surface with the decay kernel to spread emission off the road,
+        conserving total emission; clips tiny negatives from the FFT.
+    """
     from scipy.signal import fftconvolve
     k = decay_kernel()
     print(f"  decay kernel: lambda={DECAY_LAMBDA:.0f} m, "
@@ -233,6 +247,9 @@ def apply_decay(surfaces):
 
 
 def emission_road_correlation(surfaces, road_raster="road_density.tif"):
+    """ Report Pearson r between the first band and the road-density raster over non-zero
+        cells, to gauge whether the two layers are redundant. Skips if the raster is absent.
+    """
     if not os.path.exists(road_raster):
         print(f"  ({road_raster} not found in outputs; skipping correlation check)")
         return None
@@ -253,6 +270,8 @@ def emission_road_correlation(surfaces, road_raster="road_density.tif"):
 
 
 def write_stack(surfaces, path):
+    """ Write the four band surfaces as a 4-band float32 GeoTIFF on the common grid.
+    """
     band_order = list(BANDS)
     with rasterio.open(
         path, "w", driver="GTiff",
@@ -267,6 +286,8 @@ def write_stack(surfaces, path):
 
 
 def main():
+    """ Build, decay, and write the four GTFS emission bands, then run the road check.
+    """
     routes_kept = load_routes()
     route_band = build_route_band(routes_kept)
     route_gdf = build_route_lines(routes_kept)

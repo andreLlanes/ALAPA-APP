@@ -1,20 +1,19 @@
-"""
-Road network density for Metro Manila on the study's common 100 m grid
-(Section: Road Network Density). Each cell is assigned the total length of road
-within it (metres); cells with no roads are zero. Output is a single-band
-GeoTIFF aligned cell-for-cell with the building-fraction and GTFS layers.
+""" Road network density for Metro Manila on the study's common 100 m grid
+    (Section: Road Network Density). Each cell is assigned the total length of road
+    within it (metres); cells with no roads are zero. Output is a single-band
+    GeoTIFF aligned cell-for-cell with the building-fraction and GTFS layers.
 
-Roads are fetched from OpenStreetMap via Overpass with the same tiled,
-cached, resumable approach as the building fetcher (mm_buildings.py): the MM
-bounding box is split into tiles, each queried and cached to its own file, so a
-stopped run resumes from cache. All highway types are included except clearly
-non-vehicular pedestrian ways (footway, path, steps, cycleway, pedestrian);
-set ROAD_INCLUDE_ALL=1 to include literally every highway tag.
+    Roads are fetched from OpenStreetMap via Overpass with the same tiled,
+    cached, resumable approach as the building fetcher (mm_buildings.py): the MM
+    bounding box is split into tiles, each queried and cached to its own file, so a
+    stopped run resumes from cache. All highway types are included except clearly
+    non-vehicular pedestrian ways (footway, path, steps, cycleway, pedestrian);
+    set ROAD_INCLUDE_ALL=1 to include literally every highway tag.
 
-Length per cell is computed exactly: road lines are projected to UTM 51N and
-intersected with each grid cell's square, and the clipped segment lengths are
-summed per cell. Processing is per tile so the whole network never needs to sit
-in memory at once.
+    Length per cell is computed exactly: road lines are projected to UTM 51N and
+    intersected with each grid cell's square, and the clipped segment lengths are
+    summed per cell. Processing is per tile so the whole network never needs to sit
+    in memory at once.
 """
 
 import json
@@ -61,6 +60,8 @@ SLEEP_BETWEEN_TILES = float(os.environ.get("ROAD_SLEEP_BETWEEN", "2"))
 
 
 def frange(start, stop, step):
+    """ Yield floats from start up to (not including) stop in increments of step.
+    """
     v = start
     while v < stop - 1e-9:
         yield v
@@ -68,6 +69,9 @@ def frange(start, stop, step):
 
 
 def build_tiles(bbox, step):
+    """ Split a (min_lat, min_lon, max_lat, max_lon) bbox into step-degree tiles for
+        Overpass queries.
+    """
     min_lat, min_lon, max_lat, max_lon = bbox
     tiles = []
     for lat0 in frange(min_lat, max_lat, step):
@@ -80,12 +84,16 @@ def build_tiles(bbox, step):
 
 
 def tile_cache_path(tile):
+    """ Return the on-disk cache path for one tile's Overpass JSON.
+    """
     lat0, lon0, lat1, lon1 = tile
     name = f"tile_{lat0}_{lon0}_{lat1}_{lon1}.json".replace("-", "m")
     return os.path.join(CACHE_DIR, name)
 
 
 def overpass_query(tile):
+    """ Build the Overpass QL query for all highway ways within a tile.
+    """
     lat0, lon0, lat1, lon1 = tile
     return f"""
 [out:json][timeout:{QUERY_TIMEOUT}];
@@ -95,6 +103,9 @@ out geom;
 
 
 def fetch_tile(tile):
+    """ Return a tile's road JSON from cache, or fetch it from Overpass (with endpoint
+        rotation and retries) and cache it. Returns (json, source).
+    """
     cache_path = tile_cache_path(tile)
     if os.path.exists(cache_path):
         with open(cache_path) as f:
@@ -124,6 +135,9 @@ def fetch_tile(tile):
 
 
 def lines_from_json(road_json):
+    """ Extract road centerline LineStrings from Overpass JSON, dropping excluded highway
+        types unless INCLUDE_ALL is set.
+    """
     records = []
     for el in road_json.get("elements", []):
         if el.get("type") == "way" and "geometry" in el:
@@ -137,7 +151,8 @@ def lines_from_json(road_json):
 
 
 def accumulate_lengths(gdf_utm, length_grid):
-    """Clip each road line to the cells it crosses and add segment length in m."""
+    """ Clip each road line to the cells it crosses and add segment length in m.
+    """
     for geom in gdf_utm.geometry:
         if geom is None or geom.is_empty:
             continue
@@ -157,6 +172,9 @@ def accumulate_lengths(gdf_utm, length_grid):
 
 
 def main():
+    """ Fetch roads tile by tile, rasterize total road length per cell onto the common
+        grid, and write road_density.tif.
+    """
     tiles = build_tiles(MM_BBOX, TILE_STEP_DEG)
     mode = "ALL highway types" if INCLUDE_ALL else "vehicular roads (peds excluded)"
     print(f"MM bbox split into {len(tiles)} tiles; including {mode}")
