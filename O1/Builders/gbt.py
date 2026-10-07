@@ -3,10 +3,13 @@
 Two Parquet files per station, which avoids duplicating the backward-looking
 feature block across all 72 lead times (that duplication was ~90% of total
 dataset size):
-    <station>_backward.parquet - location_key, origin, lags, rolling stats
-                                 (one row per origin).
+    <station>_backward.parquet - location_key, origin, lags, rolling stats,
+                                 origin_filled (one row per origin).
     <station>_leads.parquet    - location_key, origin, lead, target-hour time
-                                 encodings, target-hour met, y (72 rows per origin).
+                                 encodings, target-hour met, y, y_filled
+                                 (72 rows per origin).
+(origin_filled / y_filled: the hour was interpolated; clean source only. Filled
+targets are estimates, so scoring and training losses should skip them.)
 Rejoin on (location_key, origin) at training time to recover the exact flat table;
 this is lossless de-duplication.
 
@@ -26,7 +29,8 @@ import pandas as pd
 from common_build import station_keys, load_station, shard_dir, safe_name  # sets sys.path
 from schema import (
     KEY_COL, TIME_COL, PM25_COL, MET_COLS, TIME_COLS,
-    LAG_OFFSETS, ROLL_WINDOWS, ROLL_STATS, LOOKBACK_H, HORIZON_H, contiguous_step_mask,
+    LAG_OFFSETS, ROLL_WINDOWS, ROLL_STATS, LOOKBACK_H, HORIZON_H,
+    exclusion_window_starts, filled_flags,
 )
 from _masked_gbt import build_gbt_tables_masked
 
@@ -37,11 +41,13 @@ def build_gbt_tables(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
     For each (station, origin) with a fully valid 144h span, every lead time h
     gets a row of: the backward-looking PM2.5 features (lags and rolling stats,
     shared across h), the target-hour time encodings and met (specific to h), and
-    target y = pm25 at origin + h.
+    target y = pm25 at origin + h. Valid spans come from
+    schema.exclusion_window_starts, the same rule as the LSTM and GNN builders and
+    the baselines, so all models see the same windows. Each row also carries
+    y_filled (the target hour was interpolated) and origin_filled.
 
-    Vectorized per station: valid origins are found once via prefix sums, the
-    backward features are gathered by fancy indexing, and each lead table is
-    assembled by column-stacking rather than per-row dicts.
+    Vectorized per station: the backward features are gathered by fancy indexing,
+    and each lead table is assembled by column-stacking rather than per-row dicts.
 
     Returns:
         tables: dict mapping lead time (1..horizon) to a DataFrame.
@@ -59,6 +65,8 @@ def build_gbt_tables(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
     per_lead_y = {h: [] for h in range(1, horizon + 1)}
     per_lead_key = {h: [] for h in range(1, horizon + 1)}
     per_lead_origin = {h: [] for h in range(1, horizon + 1)}
+    per_lead_yfilled = {h: [] for h in range(1, horizon + 1)}
+    per_lead_ofilled = {h: [] for h in range(1, horizon + 1)}
 
     for key, g in df.groupby(KEY_COL, sort=False):
         g = g.sort_values(TIME_COL).reset_index(drop=True)
@@ -66,34 +74,12 @@ def build_gbt_tables(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
         met = g[MET_COLS].to_numpy(dtype=float)
         tenc = g[TIME_COLS].to_numpy(dtype=float)
         times = g[TIME_COL].to_numpy()
-        n = len(g)
-        if n < window_len:
-            continue
 
-        pm_ok = ~np.isnan(pm25)
-        met_ok = ~np.isnan(met).any(axis=1)
-        step_ok = contiguous_step_mask(times)
-
-        starts = np.arange(0, n - window_len + 1, stride)
-        if len(starts) == 0:
-            continue
-
-        def all_true_over(mask, length):
-            csum = np.concatenate(([0], np.cumsum(mask)))
-            return (csum[starts + length] - csum[starts]) == length
-
-        pm_full_ok = all_true_over(pm_ok, window_len)
-        csum_met = np.concatenate(([0], np.cumsum(met_ok)))
-        met_horizon_ok = (csum_met[starts + window_len]
-                          - csum_met[starts + lookback]) == horizon
-        csum_step = np.concatenate(([0], np.cumsum(step_ok)))
-        step_win_ok = (csum_step[starts + window_len]
-                       - csum_step[starts + 1]) == (window_len - 1)
-
-        valid = pm_full_ok & met_horizon_ok & step_win_ok
-        s = starts[valid]
+        s = exclusion_window_starts(g, lookback, horizon)
+        s = s[s % stride == 0]
         if len(s) == 0:
             continue
+        target_filled, origin_filled = filled_flags(g, s, lookback, horizon)
         mid = s + lookback
         origin_idx = mid - 1
 
@@ -120,9 +106,11 @@ def build_gbt_tables(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
             per_lead_y[h].append(pm25[ti])
             per_lead_key[h].append(keys)
             per_lead_origin[h].append(origins)
+            per_lead_yfilled[h].append(target_filled[:, h - 1])
+            per_lead_ofilled[h].append(origin_filled)
 
     tables = {}
-    col_order = [KEY_COL, "origin"] + feature_cols + ["y"]
+    col_order = [KEY_COL, "origin"] + feature_cols + ["y", "y_filled", "origin_filled"]
     for h in range(1, horizon + 1):
         if not per_lead_backward[h]:
             tables[h] = pd.DataFrame(columns=col_order)
@@ -139,6 +127,8 @@ def build_gbt_tables(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
         tbl.insert(0, "origin", origins)
         tbl.insert(0, KEY_COL, keys)
         tbl["y"] = y
+        tbl["y_filled"] = np.concatenate(per_lead_yfilled[h])
+        tbl["origin_filled"] = np.concatenate(per_lead_ofilled[h])
         tables[h] = tbl[col_order]
     return tables, feature_cols
 
@@ -178,10 +168,14 @@ def build(source, city):
         floatcols = station_tbl.select_dtypes("float64").columns
         station_tbl[floatcols] = station_tbl[floatcols].astype("float32")
 
-        backward = (station_tbl[["location_key", "origin"] + backward_cols]
+        # The masked builder does not emit the interpolation flags; keep whichever
+        # are present so both sources share this writer.
+        back_flags = [c for c in ("origin_filled",) if c in station_tbl]
+        lead_flags = [c for c in ("y_filled",) if c in station_tbl]
+        backward = (station_tbl[["location_key", "origin"] + backward_cols + back_flags]
                     .drop_duplicates(["location_key", "origin"])
                     .reset_index(drop=True))
-        leads = station_tbl[["location_key", "origin", "lead"] + lead_cols + ["y"]]
+        leads = station_tbl[["location_key", "origin", "lead"] + lead_cols + ["y"] + lead_flags]
 
         stem = safe_name(location_key)
         backward.to_parquet(os.path.join(outdir, f"{stem}_backward.parquet"), index=False)

@@ -8,8 +8,11 @@ training time, so the builder emits only the graph ingredients (coordinates); th
 graph is constructed at training for each k via build_graph, which is kept in this
 module for training to import.
 
-    clean source  -> build_gnn_windows (exclusion)
+    clean source  -> build_gnn_windows (exclusion, schema.exclusion_window_starts)
     masked source -> build_gnn_windows_masked (keep lookback-pm25 NaN + emit mask)
+
+Clean shards also carry Y_filled and origin_filled (interpolated target and
+origin hours), as in the LSTM shards.
 
 Station coordinates come from the merged table itself. Datasets are unnormalized.
 """
@@ -22,7 +25,7 @@ import pandas as pd
 from common_build import load_station, station_coords, shard_dir, safe_name  # sets sys.path
 from schema import (
     KEY_COL, TIME_COL, PM25_COL, ENCODER_COLS, DECODER_COLS,
-    LOOKBACK_H, HORIZON_H, contiguous_step_mask,
+    LOOKBACK_H, HORIZON_H, exclusion_window_starts, filled_flags,
 )
 from _masked_windows import build_gnn_windows_masked
 
@@ -101,15 +104,19 @@ def build_graph(stations: pd.DataFrame, node_order: list[str], k: int,
 
 
 def build_gnn_windows(df, node_order, lookback=LOOKBACK_H, horizon=HORIZON_H,
-                      stride=1):
+                      stride=1, return_filled=False):
     """Slice exclusion windows (as in the LSTM) and tag each with its node index.
 
+    Windows come from schema.exclusion_window_starts, the same rule as the LSTM
+    builder and the baselines.
+
     Returns X_enc, X_dec, Y, and a meta DataFrame that additionally carries a
-    node_index column so tensors align to graph nodes.
+    node_index column so tensors align to graph nodes. With return_filled=True,
+    also Y_filled ((n, horizon) bool) and origin_filled ((n,) bool).
     """
     node_of = {k: i for i, k in enumerate(node_order)}
     window_len = lookback + horizon
-    Xe, Xd, Ys, rows = [], [], [], []
+    Xe, Xd, Ys, rows, Yf, Of = [], [], [], [], [], []
 
     for key, g in df.groupby(KEY_COL, sort=False):
         if key not in node_of:
@@ -120,22 +127,16 @@ def build_gnn_windows(df, node_order, lookback=LOOKBACK_H, horizon=HORIZON_H,
         pm25 = g[PM25_COL].to_numpy(dtype=float)
         times = g[TIME_COL].to_numpy()
 
-        enc_ok = ~np.isnan(enc_vals).any(axis=1)
-        dec_ok = ~np.isnan(dec_vals).any(axis=1)
-        pm_ok = ~np.isnan(pm25)
-        step_ok = contiguous_step_mask(times)
+        starts = exclusion_window_starts(g, lookback, horizon)
+        starts = starts[starts % stride == 0]
+        if starts.size:
+            target_filled, origin_filled = filled_flags(g, starts, lookback, horizon)
+            Yf.append(target_filled)
+            Of.append(origin_filled)
 
-        for start in range(0, len(g) - window_len + 1, stride):
+        for start in starts:
             mid = start + lookback
             end = start + window_len
-            if not enc_ok[start:mid].all():
-                continue
-            if not dec_ok[mid:end].all():
-                continue
-            if not pm_ok[mid:end].all():
-                continue
-            if not step_ok[start + 1:end].all():
-                continue
             Xe.append(enc_vals[start:mid])
             Xd.append(dec_vals[mid:end])
             Ys.append(pm25[mid:end])
@@ -144,12 +145,16 @@ def build_gnn_windows(df, node_order, lookback=LOOKBACK_H, horizon=HORIZON_H,
                          "end": times[end - 1]})
 
     if not Xe:
-        return (np.empty((0, lookback, len(ENCODER_COLS))),
-                np.empty((0, horizon, len(DECODER_COLS))),
-                np.empty((0, horizon)),
-                pd.DataFrame(columns=[KEY_COL, "node_index", "start",
-                                      "origin", "end"]))
-    return np.stack(Xe), np.stack(Xd), np.stack(Ys), pd.DataFrame(rows)
+        out = (np.empty((0, lookback, len(ENCODER_COLS))),
+               np.empty((0, horizon, len(DECODER_COLS))),
+               np.empty((0, horizon)),
+               pd.DataFrame(columns=[KEY_COL, "node_index", "start",
+                                     "origin", "end"]))
+        filled = (np.empty((0, horizon), dtype=bool), np.empty(0, dtype=bool))
+    else:
+        out = (np.stack(Xe), np.stack(Xd), np.stack(Ys), pd.DataFrame(rows))
+        filled = (np.concatenate(Yf), np.concatenate(Of))
+    return out + filled if return_filled else out
 
 
 def build(source, city):
@@ -184,8 +189,10 @@ def build(source, city):
         df = load_station(source, location_key)
         if df.empty:
             continue
+        Y_filled = origin_filled = None
         if source == "clean":
-            X_enc, X_dec, Y, meta = build_gnn_windows(df, node_order)
+            X_enc, X_dec, Y, meta, Y_filled, origin_filled = build_gnn_windows(
+                df, node_order, return_filled=True)
             enc_mask = None
         else:
             X_enc, X_dec, Y, enc_mask, meta = build_gnn_windows_masked(df, node_order)
@@ -199,6 +206,10 @@ def build(source, city):
             "node_index": np.full(X_enc.shape[0], node_of[location_key], dtype=np.int64),
             "meta_origin": meta["origin"].dt.tz_localize(None).to_numpy().astype("datetime64[ns]"),
         }
+        if Y_filled is not None:
+            # Interpolated hours: skip filled targets when scoring or in the loss.
+            payload["Y_filled"] = Y_filled
+            payload["origin_filled"] = origin_filled
         if enc_mask is not None:
             payload["enc_mask"] = enc_mask.astype(np.int8)
 

@@ -10,6 +10,7 @@ import numpy as np
 PM25_COL = "pm25"
 KEY_COL = "location_key"
 TIME_COL = "timestamp_utc"
+FILLED_COL = "short_gap_filled"   # True where pm25 came from <=3 h interpolation
 
 # Merged tables written by Clean/ and read by Builders/ and O2. Versioned so a
 # rebuild under a changed schema never writes into, or reads from, an older one;
@@ -93,3 +94,25 @@ def exclusion_window_starts(g, lookback: int = LOOKBACK_H, horizon: int = HORIZO
              & all_true(pm_ok, lookback, window_len)
              & all_true(step_ok, 1, window_len))
     return np.flatnonzero(valid)
+
+
+def filled_flags(g, starts, lookback: int = LOOKBACK_H, horizon: int = HORIZON_H):
+    """Return which target hours and origins of the given windows were interpolated.
+
+    Interpolated hours are inputs, never ground truth: scoring and training losses
+    skip filled target hours, and persistence needs to know when the value it
+    carries forward (the origin hour) was itself filled.
+
+    Returns:
+        target_filled: (n, horizon) bool, True where the target hour was filled.
+        origin_filled: (n,) bool, True where the origin hour (last lookback hour)
+            was filled.
+    """
+    starts = np.asarray(starts, dtype=int)
+    if FILLED_COL in g:
+        filled = g[FILLED_COL].fillna(False).to_numpy(dtype=bool)
+    else:
+        filled = np.zeros(len(g), dtype=bool)
+    target_filled = filled[starts[:, None] + lookback + np.arange(horizon)]
+    origin_filled = filled[starts + lookback - 1]
+    return target_filled, origin_filled

@@ -49,10 +49,16 @@ O2/
 
 ## Data partitioning
 
-Section 4.7.3 defines two temporal designs. Both are implemented, and both are
-normally run: they answer different questions.
+Section 4.7.3 defines two temporal designs, both implemented in `common/splits.py`
+with frozen dates. Who uses which:
 
-### Chronological split (`--protocol fixed`)
+| Protocol | Models | Baselines (persistence, climatology) |
+| --- | --- | --- |
+| Chronological split, test partition | yes (own-station; also LOSO's fixed test period) | **yes: the skill score is computed here** |
+| Rolling origin | yes (ranking stability across seasons) | no |
+| Leave-one-station-out (kriged) | yes (spatial generalization, hypothesis tests) | no |
+
+### Chronological split
 
 The record is split chronologically into training, validation, and test
 partitions in the proportions **70 / 15 / 15 of the usable forecast windows**
@@ -82,7 +88,7 @@ Three details make the split safe to share across stations and models:
   approximate to the granularity of the origin timestamps; `windows.json` records
   what was actually achieved.
 
-### Rolling origin (`--protocol rolling`)
+### Rolling origin (models only)
 
 Temporal generalization is assessed by advancing the split point through the
 record. A model trains on all data up to a given origin and is evaluated on the
@@ -96,10 +102,8 @@ history before its test period. Within that history, the most recent **15%** of
 the windows is the fold's **validation** set, for early stopping, and the same
 72-hour purge gap separates training from validation and validation from test.
 The four test periods are consecutive and half-open, so they neither overlap nor
-leave an hour unscored, and no origin is ever in two parts of the same fold.
-
-Counts default to the manuscript's design but are adjustable with `--origins`
-and `--test-months`.
+leave an hour unscored, and no origin is ever in two parts of the same fold. The
+four blocks are frozen in `common/split_dates.json`.
 
 ### What both share
 
@@ -202,47 +206,39 @@ python O1/Builders/main.py --source all --city all --model lstm
 ```bash
 cd O2/Baselines
 
-# one combination, scored on the fixed test period
-python main.py --source masked --city "Metro Manila" --baseline persistence
+# persistence on the test partition of the chronological split
+python main.py --source clean --city "Metro Manila" --baseline persistence
 
-# the rolling-origin protocol: four origins, three months each
-python main.py --source masked --city "Metro Manila" --baseline persistence --protocol rolling
+# everything (missing datasets are skipped with a note)
+python main.py --source all --city all --baseline all
 
-# everything (missing or too-short datasets are skipped with a note)
-python main.py --source all --city all --baseline all --protocol all
-
-# diagnostic only: score a different partition of the fixed split
+# diagnostic only: score a different partition of the split
 python main.py --source clean --city "Metro Manila" --baseline persistence --split train
 ```
 
-`--split` defaults to `test` and applies only to `--protocol fixed`. The
-baselines fit nothing, so their train and validation scores leak nothing, but the
-figures the models are compared against are the test ones. Every protocol and
-window writes to its own folder, so no run can overwrite another.
+`--split` defaults to `test`. The baselines fit nothing, so their train and
+validation scores leak nothing, but the figures the models are compared against
+are the test ones. The baselines are not run under rolling origin or
+leave-one-station-out: those are model-only protocols, and the skill score is
+computed on the test partition, where models and baselines forecast each station
+from its own history on the same windows.
 
 ## Outputs
 
-Written to `O2/Outputs/<baseline>/<citySlug>/<source>/<protocol>/`:
+Written to `O2/Outputs/<baseline>/<citySlug>/<source>/fixed/`:
 
 | File | Contents |
 | --- | --- |
-| `windows.json` | The protocol's cut timestamps, calendar spans, and origin counts. |
-| `summary.csv` | One row per evaluation window: fold-averaged metrics. |
-| `<window>/folds.csv` | One row per station: RMSE, MAE, MBE, IOA, R2, window counts, origin-gap stats. |
-| `<window>/by_lead.csv` | One row per (station, lead time): the same metrics at each of the 72 leads. |
-| `<window>/lead_curve.csv` | Fold-averaged metrics per lead, for the skill-vs-lead-time plot. |
-| `<window>/forecasts/<station>.npz` | Forecast origins and y(t), which regenerate every prediction. |
-
-`<window>` is the partition name under `fixed` (e.g. `test`) and `origin1` …
-`origin4` under `rolling`.
+| `windows.json` | The cut timestamps, calendar spans, and origin counts. |
+| `summary.csv` | Station-averaged metrics for the scored partition. |
+| `<split>/folds.csv` | One row per station: RMSE, MAE, MBE, IOA, R2, window counts, origin-gap stats. |
+| `<split>/by_lead.csv` | One row per (station, lead time): the same metrics at each of the 72 leads. |
+| `<split>/lead_curve.csv` | Station-averaged metrics per lead, for the skill-vs-lead-time plot. |
+| `<split>/forecasts/<station>.npz` | Forecast origins and y(t), which regenerate every prediction. |
 
 ## Notes
 
-- **Leave-one-station-out.** Persistence fits nothing and reads only the withheld
-  station's own history, so withholding a station changes none of its forecasts:
-  each per-station row already is that station's LOSO fold score. The twenty
-  stratified folds are a subset of the rows in `folds.csv`, not a separate run.
-- **Fold averaging** weights each station equally regardless of how many
+- **Station averaging** weights each station equally regardless of how many
   forecasts it contributes, so a few high-volume stations cannot dominate.
 - **Masked source.** Where the origin hour itself is missing, persistence carries
   the most recent observed hour forward and records its age in `origin_gap_h`,
@@ -271,36 +267,43 @@ period.
 From the repository root:
 
 ```bash
-python O2/Baselines/climatology.py --city "Metro Manila"            # main split + rolling origin
-python O2/Baselines/climatology.py --city all --periods main
-python O2/Baselines/climatology.py --no-persist                      # do not write to Postgres
+python O2/Baselines/climatology.py --city "Metro Manila"
+python O2/Baselines/climatology.py --city all
+python O2/Baselines/climatology.py --no-persist          # do not write to Postgres
 ```
 
 The script reads the O1 table `MERGED_TABLE` (`openaq.merged_clean_v2`, set in
-`O1/common/schema.py`) and fits and scores climatology once per evaluation period,
-using the frozen dates in `common/split_dates.json` (a city must be frozen first):
-
-- `main`: fitted on the hours the training partition covers, scored on the test
-  partition's windows.
-- `ro_1` to `ro_4`: each fitted on its block's training hours and scored on its
-  three-month test block.
+`O1/common/schema.py`). It fits climatology on the hours the training partition
+covers and scores it on the test partition's windows, using the frozen dates in
+`common/split_dates.json` (a city must be frozen first). Like persistence, it is
+not run under rolling origin or leave-one-station-out.
 
 Scoring follows the same rules as the models, so skill scores compare like with like:
 
 - Windows come from `exclusion_window_starts` in `O1/common/schema.py`, the rule
   the LSTM builder uses, so climatology is scored on exactly the models' windows.
 - Interpolated hours (`short_gap_filled`) are never used: the hourly means are
-  fitted on measured hours only, and filled target hours are not scored.
+  fitted on measured hours only, filled target hours are not scored, and windows
+  whose origin hour was filled are not scored at all (as in persistence).
 - Metrics (RMSE, MAE, MBE, IOA, R²) come from `O2/common/metrics.py`, computed per
   station and then averaged with every station weighted equally, overall and at
   each of the 72 lead times.
 - A station is scored only if it has at least 10 measured training hours at every
   hour of day, plus test windows.
-- Eligible stations come from the frozen fold file `O2/Folds/loso_folds.json` when
-  it exists. Until then they are chosen by measured-hour completeness
-  (`--min-completeness`, default 0.70).
+- Stations come from the frozen fold file's `training_pool` (completeness ≥70%),
+  the pool every method uses. For a city the fold file does not cover, they are
+  chosen by measured-hour completeness (`--min-completeness`, default 0.70).
 
-Outputs, under `O2/Outputs/climatology/<citySlug>/<period>/` (gitignored):
+## Interpolated hours (all baselines, and the models)
+
+Clean-source shards carry `Y_filled` (interpolated target hours) and
+`origin_filled` (the origin hour was interpolated). Filled targets are estimates,
+so they are never scored. A filled origin was interpolated from the hours just
+after it, which are the window's own first targets, so its inputs leak part of
+the answer: such windows are not scored either (about 10% of Manila windows).
+Model training and evaluation should apply the same two rules.
+
+Outputs, under `O2/Outputs/climatology/<citySlug>/main/` (gitignored):
 `stations.csv` (per-station metrics), `by_lead.csv` (per station and lead),
 `lead_curve.csv` (station-averaged metrics per lead) and `summary.json`.
 

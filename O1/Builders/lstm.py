@@ -7,6 +7,10 @@ station to Outputs/lstm/<citySlug>/<source>/<station>.npz.
     clean source  -> build_lstm_windows (exclusion: drop any window with a NaN)
     masked source -> build_lstm_windows_masked (keep lookback-pm25 NaN + emit mask)
 
+Clean shards also carry Y_filled ((n, 72) bool) and origin_filled ((n,) bool),
+marking interpolated target and origin hours. Filled targets are estimates, so
+scoring and training losses should skip them.
+
 Datasets are unnormalized; train-only normalization happens at training time.
 """
 
@@ -18,12 +22,13 @@ import pandas as pd
 from common_build import station_keys, load_station, shard_dir, safe_name  # sets sys.path
 from schema import (
     KEY_COL, TIME_COL, PM25_COL, ENCODER_COLS, DECODER_COLS,
-    LOOKBACK_H, HORIZON_H, exclusion_window_starts,
+    LOOKBACK_H, HORIZON_H, exclusion_window_starts, filled_flags,
 )
 from _masked_windows import build_lstm_windows_masked
 
 
-def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
+def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1,
+                       return_filled=False):
     """Slice a station's frame into exclusion windows (no NaN anywhere).
 
     A window is emitted only when the encoder features, decoder features, target,
@@ -35,9 +40,11 @@ def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
         X_dec: (n, horizon, |DECODER_COLS|) known-future features.
         Y: (n, horizon) target pm25.
         meta: DataFrame with location_key, start, origin, end per window.
+        With return_filled=True, also Y_filled ((n, horizon) bool) and
+        origin_filled ((n,) bool): which targets and origins were interpolated.
     """
     window_len = lookback + horizon
-    Xe, Xd, Ys, rows = [], [], [], []
+    Xe, Xd, Ys, rows, Yf, Of = [], [], [], [], [], []
 
     for key, g in df.groupby(KEY_COL, sort=False):
         g = g.sort_values(TIME_COL).reset_index(drop=True)
@@ -46,9 +53,14 @@ def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
         pm25 = g[PM25_COL].to_numpy(dtype=float)
         times = g[TIME_COL].to_numpy()
 
-        for start in exclusion_window_starts(g, lookback, horizon):
-            if start % stride:
-                continue
+        starts = exclusion_window_starts(g, lookback, horizon)
+        starts = starts[starts % stride == 0]
+        if starts.size:
+            target_filled, origin_filled = filled_flags(g, starts, lookback, horizon)
+            Yf.append(target_filled)
+            Of.append(origin_filled)
+
+        for start in starts:
             mid = start + lookback
             end = start + window_len
             Xe.append(enc_vals[start:mid])
@@ -58,11 +70,15 @@ def build_lstm_windows(df, lookback=LOOKBACK_H, horizon=HORIZON_H, stride=1):
                          "origin": times[mid - 1], "end": times[end - 1]})
 
     if not Xe:
-        return (np.empty((0, lookback, len(ENCODER_COLS))),
-                np.empty((0, horizon, len(DECODER_COLS))),
-                np.empty((0, horizon)),
-                pd.DataFrame(columns=[KEY_COL, "start", "origin", "end"]))
-    return np.stack(Xe), np.stack(Xd), np.stack(Ys), pd.DataFrame(rows)
+        out = (np.empty((0, lookback, len(ENCODER_COLS))),
+               np.empty((0, horizon, len(DECODER_COLS))),
+               np.empty((0, horizon)),
+               pd.DataFrame(columns=[KEY_COL, "start", "origin", "end"]))
+        filled = (np.empty((0, horizon), dtype=bool), np.empty(0, dtype=bool))
+    else:
+        out = (np.stack(Xe), np.stack(Xd), np.stack(Ys), pd.DataFrame(rows))
+        filled = (np.concatenate(Yf), np.concatenate(Of))
+    return out + filled if return_filled else out
 
 
 def build(source, city):
@@ -75,8 +91,10 @@ def build(source, city):
         df = load_station(source, location_key)
         if df.empty:
             continue
+        Y_filled = origin_filled = None
         if source == "clean":
-            X_enc, X_dec, Y, meta = build_lstm_windows(df)
+            X_enc, X_dec, Y, meta, Y_filled, origin_filled = build_lstm_windows(
+                df, return_filled=True)
             enc_mask = None
         else:
             X_enc, X_dec, Y, enc_mask, meta = build_lstm_windows_masked(df)
@@ -92,6 +110,10 @@ def build(source, city):
             "meta_location_key": meta["location_key"].to_numpy().astype(str),
             "meta_origin": meta["origin"].dt.tz_localize(None).to_numpy().astype("datetime64[ns]"),
         }
+        if Y_filled is not None:
+            # Interpolated hours: skip filled targets when scoring or in the loss.
+            payload["Y_filled"] = Y_filled
+            payload["origin_filled"] = origin_filled
         if enc_mask is not None:
             payload["enc_mask"] = enc_mask.astype(np.int8)
 

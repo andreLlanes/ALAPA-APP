@@ -13,6 +13,7 @@ city/source vocabulary are imported from O1 rather than restated, so O2 cannot
 drift from the data contract the datasets were built under.
 """
 
+import json
 import os
 import sys
 
@@ -39,6 +40,41 @@ OUTPUT_ROOT = os.path.join(_O2_ROOT, "Outputs")
 # The LSTM shards define the evaluation set: they are the only builder output
 # that stores the raw lookback PM2.5 series a naive forecast needs.
 WINDOW_MODEL = "lstm"
+
+# The frozen folds also record the study's station pool (completeness >= 70%).
+FOLD_FILE = os.path.join(_O2_ROOT, "Folds", "loso_folds.json")
+
+
+def station_pool(city, path=FOLD_FILE):
+    """Return the set of stations that pass the study's quality rule, or None.
+
+    The pool is read from the frozen fold file (its ``training_pool``), so every
+    baseline and model scores the same stations. Returns None when the fold file
+    does not cover this city (the folds are drawn for Metro Manila only); callers
+    then score every station and say so.
+    """
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        record = json.load(f)
+    if record.get("settings", {}).get("city") != city:
+        return None
+    rows = record.get("training_pool", record["eligible_stations"])
+    return {s["location_key"] for s in rows}
+
+
+def load_filled_flags(path):
+    """Return one station's (Y_filled, origin_filled), or (None, None) if absent.
+
+    Y_filled marks interpolated target hours, which are never scored.
+    origin_filled marks windows whose origin hour was interpolated: that value was
+    drawn from the hours just after it, which are the window's first targets, so
+    such windows are never scored either. Masked-source shards carry no flags.
+    """
+    with np.load(path, allow_pickle=False) as z:
+        if "Y_filled" not in z.files:
+            return None, None
+        return np.asarray(z["Y_filled"], dtype=bool), np.asarray(z["origin_filled"], dtype=bool)
 
 
 def city_slug(city):

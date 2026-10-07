@@ -54,7 +54,7 @@ for _p in (os.path.join(_O2_ROOT, "common"), os.path.join(_O2_ROOT, "Baselines")
 from common_baseline import (  # noqa: E402  (path bootstrap must run first)
     ALL_CITIES, ALL_SOURCES, result_dir, shard_paths, load_origins,
 )
-from splits import chronological_cuts, partition_mask  # noqa: E402
+from splits import frozen_fixed_cuts, partition_mask  # noqa: E402
 from ablation import (  # noqa: E402
     ABLATION_LEVELS, ABLATION_DRAWS, DEFAULT_BLOCK_HOURS, MIN_BLOCK_HOURS,
     SEED_BASE, build_plan, training_span,
@@ -65,17 +65,19 @@ STAGE = "ablation"
 TARGET_CITY = "Metro Manila"
 
 
-def training_origins(paths):
+def training_origins(paths, city):
     """Return the pooled origins falling in the chronological training partition.
 
-    Reads only the origin arrays, so the plan costs kilobytes per station rather
-    than loading any window tensors.
+    The cuts are the city's frozen ones (O2/common/split_dates.json), so the
+    ablation reduces exactly the training partition the models train on. Reads
+    only the origin arrays, so the plan costs kilobytes per station rather than
+    loading any window tensors.
     """
     collected = [o for o in (load_origins(p) for p in paths) if o.size]
     if not collected:
         raise ValueError("no origins found in any shard")
     origins = np.concatenate(collected)
-    cuts = chronological_cuts(origins)
+    cuts = frozen_fixed_cuts(city)
     return origins[partition_mask(origins, cuts, "train")], cuts
 
 
@@ -84,7 +86,7 @@ def build(source, city, levels=ABLATION_LEVELS, draws=ABLATION_DRAWS,
           seed_base=SEED_BASE):
     """Build and write the ablation manifest for one (source, city)."""
     paths = shard_paths(city, source)
-    train_origins, cuts = training_origins(paths)
+    train_origins, cuts = training_origins(paths, city)
     span_start, span_end = training_span(train_origins)
 
     plan = build_plan(train_origins, levels, draws, block_hours, erode, calibrate,
@@ -182,7 +184,7 @@ def main():
             try:
                 build(source, city, args.levels, args.draws, args.block_hours,
                       args.erode, args.calibrate, args.seed_base)
-            except (FileNotFoundError, ValueError) as exc:
+            except (FileNotFoundError, KeyError, ValueError) as exc:
                 print(f"[{STAGE}] {source}/{city}: skipped, {exc}")
 
 
