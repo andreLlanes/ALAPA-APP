@@ -1,7 +1,7 @@
 """ Copy the database to local files (one per city), so runs read the copy and never query the
     database again. Recopy only after the database changes.
-    PYTHONPATH=.. python -m data.database             copy if missing
-    PYTHONPATH=.. python -m data.database --refresh   recopy everything
+    python -m data.database             copy if missing
+    python -m data.database --refresh   recopy everything
 """
 
 import argparse
@@ -40,9 +40,10 @@ def fetch_city_rows(cur, city: str) -> pd.DataFrame:
     """
     query = cur.mogrify(f"SELECT * FROM {TABLE} WHERE city = %s ORDER BY {KEY_COL}, {TIME_COL}",
                         (CITIES[city],)).decode()
-    # Bulk export streamed to a temporary file, so the CSV text never sits in memory.
+    # Bulk export streamed to a temporary binary file (psycopg2 writes bytes; a text-mode file
+    # fails on Windows), so the CSV text never sits in memory.
     COPY_DIR.mkdir(exist_ok=True)
-    with tempfile.TemporaryFile("w+", dir=COPY_DIR) as tmp:
+    with tempfile.TemporaryFile("w+b", dir=COPY_DIR) as tmp:
         cur.copy_expert(f"COPY ({query}) TO STDOUT WITH CSV HEADER", tmp)
         tmp.seek(0)
         df = pd.read_csv(tmp)
