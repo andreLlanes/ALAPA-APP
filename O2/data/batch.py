@@ -14,6 +14,15 @@ def lstm_batches(data, ids: np.ndarray, batch_size: int, rng=None):
         batch_ids = order[i:i + batch_size]
         yield (*data.gather(batch_ids), batch_ids)
 
+def edited(batches, edit):
+    """ Wrap batch factories so that edit(x_enc, x_dec, ids) -> (x_enc, x_dec) changes the inputs
+        of every batch, whatever the model.
+    """
+    def generate():
+        for x_enc, x_dec, y, *rest in batches():
+            yield (*edit(x_enc, x_dec, rest[-1]), y, *rest)
+    return generate
+
 def station_distances_km(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
     """ Compute the distance in km between every pair of stations
         (haversine: great-circle distance from latitude/longitude).
@@ -46,20 +55,22 @@ def build_station_graph(dist: np.ndarray, k: int):
     return np.stack([src, dst]), weight.astype(np.float32)
 
 class GraphBatches:
-    """ Build GNN batches for one split: each origin hour becomes a graph of the stations that
-        have a window at that hour. Call the object once per epoch to iterate.
+    """ Build GNN batches from window ids: each origin hour of each city becomes a graph of the
+        stations that have a window then, so cities never share a graph. Call the object once per
+        epoch to iterate.
     """
 
-    def __init__(self, data, split: int, k: int, batch_size: int):
+    def __init__(self, data, ids: np.ndarray, k: int, batch_size: int):
         self.data, self.batch_size = data, batch_size
-        # Cuts are shared timestamps, so every window at an hour is in the same split:
-        # a graph only ever holds that split's windows.
-        pool = data.split_window_ids(split)
-        pool = pool[np.lexsort((data.station[pool], data.origin[pool]))]
-        bounds = np.append(np.unique(data.origin[pool], return_index=True)[1], len(pool))
+        # Cuts are shared timestamps, so every window at an hour is in the same split.
+        city = np.unique(data.city, return_inverse=True)[1][data.station[ids]]
+        graph_key = data.origin[ids].astype("int64") * (city.max() + 1) + city
+        pool = ids[np.lexsort((data.station[ids], graph_key))]
+        graph_key = np.sort(graph_key)
+        bounds = np.append(np.flatnonzero(np.diff(graph_key)) + 1, len(pool))
         dist = station_distances_km(data.lat, data.lon)
         graphs, self.groups = {}, []
-        for a, b in zip(bounds[:-1], bounds[1:]):
+        for a, b in zip(np.append(0, bounds[:-1]), bounds):
             stations = data.station[pool[a:b]]
             key = stations.tobytes()
             if key not in graphs:

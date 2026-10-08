@@ -1,11 +1,10 @@
 """ Tune, train and score one configuration for every seed (and every block under ablation).
-    PYTHONPATH=.. python train.py --model lstm --city mm
-    PYTHONPATH=.. python train.py --model gnn --city mm --transfer true --source bk
+    python train.py --model lstm --city mm
+    python train.py --model gnn --city mm --transfer true --source bk+la
 """
 
 import argparse
-import sys
-from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -13,13 +12,14 @@ import pandas as pd
 import torch
 
 import config
+from baselines import climatology, persistence, ridge
+from baselines.dlinear import DLinear
 from Common.schema import DECODER_COLS, ENCODER_COLS
 from Common.splits import TEST, TRAIN, VAL
-from data.batch import GraphBatches, lstm_batches
-from data.database import CITIES, copy_path
+from data.batch import GraphBatches, edited, lstm_batches
+from data.database import CITIES
 from data.load import load_city
-from evals import climatology, persistence
-from evals.eval import compare, print_table
+from evals.eval import all_runs, compare, print_table
 from models import transfer
 from models.gbt import GBTForecaster
 from models.gnn import GNNForecaster
@@ -28,83 +28,37 @@ from models.mmd import MMDAlignment
 from models.trainer import fit, predict, seed_everything
 from tuning.grid import load_grid, point_name, search
 from utils import runlog
+from utils.args import add_arguments, blocks, config_folder, names, read_arguments, variants
 from utils.artifacts import ROOT, config_dir, load_json, save_json, save_scores, settings_tag
 
-METHODS = ("param", "mmd")
-
-def boolean(text: str) -> bool:
-    """ Parse true/false arguments.
-    """
-    if text.lower() not in ("true", "false"):
-        raise argparse.ArgumentTypeError("expected true or false")
-    return text.lower() == "true"
-
-def parse_args():
-    """ Read the command line.
-    """
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True, choices=["lstm", "gnn", "gbt"])
-    ap.add_argument("--city", required=True, choices=list(CITIES))
-    ap.add_argument("--transfer", type=boolean, default=False)
-    ap.add_argument("--source", choices=list(CITIES))
-    ap.add_argument("--training-variant", default="all",
-                    choices=list(transfer.VARIANTS + transfer.GBT_VARIANTS) + ["all"])
-    ap.add_argument("--autoregressive", type=boolean, default=False)
-    ap.add_argument("--longest-gap", type=int, default=config.DEFAULT_LONGEST_GAP,
-                    choices=config.LONGEST_GAP_CHOICES)
-    ap.add_argument("--completeness", type=int, default=config.DEFAULT_COMPLETENESS,
-                    choices=config.COMPLETENESS_CHOICES)
-    ap.add_argument("--data-ablation", type=int, default=100, choices=config.ABLATION_CHOICES)
-    ap.add_argument("--block", default="all", choices=["0", "1", "2", "all"])
-    ap.add_argument("--seed", type=lambda t: [int(s) for s in t.split(",")],
-                    default=[42, 1234, 2026])
-    ap.add_argument("--device", default="cpu")
-    args = ap.parse_args()
-    if args.transfer and (args.source is None or args.source == args.city):
-        ap.error("--transfer true needs a --source different from --city")
-    allowed = transfer.GBT_VARIANTS if args.model == "gbt" else transfer.VARIANTS
-    if args.training_variant not in allowed + ("all",):
-        ap.error(f"--training-variant for {args.model}: {', '.join(allowed)} or all")
-    return args
-
-def header(args, block, seed, variant=None) -> str:
+def header(args, block, seed, variant) -> str:
     """ Title line of one run, e.g. [LSTM] Bangkok -> Metro Manila, mmd_frozen (...).
     """
-    where = (f"{CITIES[args.source]} -> {CITIES[args.city]}, {variant}" if args.transfer
-             else CITIES[args.city])
+    target = CITIES[args.city]
+    where = (target if not args.transfer else
+             f"Zeroshot: {names(args.sources)} -> {target}" if variant == "zeroshot" else
+             f"Pooled: {names(args.sources)} + {target}" if variant == "pooled" else
+             f"{names(args.sources)} -> {target}, {variant}")
     return (f"[{args.model.upper()}] {where} (longest gap: {args.longest_gap}, station "
             f"completeness: {args.completeness}, ablation: {args.data_ablation}, "
             f"block: {block}, seed: {seed})")
 
-def run_tag(args, block) -> str:
-    """ Name this run's data settings (gap, completeness, ablation, block).
+def tuned(title, path, score, grid) -> dict:
+    """ Return the best grid point at `path` ({params, val}), searching the grid on this run's own
+        data first if needed: every setting gets its own tuned hyperparameters.
     """
-    return settings_tag(args.longest_gap, args.completeness, args.data_ablation, block)
-
-def tuned(args, path, score, grid) -> dict:
-    """ Return the best grid point at `path` ({params, val, model, seed}), searching the grid on
-        this run's own data first if needed: every setting gets its own tuned hyperparameters.
-    """
-    best = search(grid, score, path, args.seed[0])
+    print(f"[TUNE] {title} (seed {config.TUNING_SEED})")
+    best = search(grid, score, path)
     points = load_json(path)["points"]
     runlog.detail(f"TUNING {Path(path).parent.name}/{Path(path).name}",
-                  {"best": f"{best['params']} (val {best['val']:.4f}, seed {best['seed']})"},
+                  {"best": f"{best['params']} (val {best['val']:.4f})"},
                   pd.DataFrame([{**p["params"], "val": p["val"]} for p in points]))
     return best
 
-def reusable(best, seed, suffix=""):
-    """ Return the tuned model of the best grid point if this seed would retrain it identically,
-        else None.
-    """
-    if seed != best["seed"]:
-        return None
-    path = Path(best["model"] + suffix)
-    return path if path.exists() else None
-
-def report(out, data, ids, pred):
+def report(out, data, ids, pred, val_ids, val_pred):
     """ Save and print one run's test scores.
     """
-    s = save_scores(out, data, ids, pred)
+    s = save_scores(out, data, ids, pred, val_ids, val_pred)
     runlog.detail(f"TEST {Path(out).parent.name}/{Path(out).name}",
                   {k: v for k, v in s.items() if not isinstance(v, dict)},
                   pd.read_csv(Path(out) / "stations.csv")[["location_key", "seen", "scored",
@@ -112,45 +66,100 @@ def report(out, data, ids, pred):
     print(f"    TEST: rmse = {s['rmse']:.3f} (seen = {s['seen'].get('rmse', float('nan')):.3f}, "
           f"unseen = {s['unseen'].get('rmse', float('nan')):.3f})")
 
-# LSTM / GNN
+def run_seed(args, block, variant, seed, out, data, params, train):
+    """ Train one seed unless it is done, then save its scores. train(out) returns the model;
+        params are saved with the run and describe its architecture for the batch loaders.
+    """
+    print(header(args, block, seed, variant))
+    if (out / "metrics.json").exists():
+        print("    Done (skipped)")
+        return
+    if variant == "zeroshot":
+        print(f"    No fine-tuning: the model trained on {names(args.sources)} is applied to "
+              f"{CITIES[args.city]} as is")
+    model = train(out)
+    pred, ids = predict_split(args, model, data, params, TEST)
+    val_pred, val_ids = (predict_split(args, model, data, params, VAL)
+                         if config.SAVE_VAL_PREDICTIONS else (None, None))
+    save_json(out / "params.json", params)
+    if args.model == "gbt":
+        model.importance().to_csv(out / "feature_importance.csv", index=False)
+    report(out, data, ids, pred, val_ids, val_pred)
 
-_loaders = {}
+def predict_split(args, model, data, params, split, edit=None):
+    """ Predict a split's windows; return (normalized predictions, window ids). edit(x_enc, x_dec,
+        ids) -> (x_enc, x_dec) changes the inputs first (the trees have no x_enc: None).
+    """
+    if args.model == "gbt":
+        ids = data.split_window_ids(split)
+        lookback, x_dec, _ = gbt_arrays(data, ids)
+        return model.predict(lookback, x_dec if edit is None else edit(None, x_dec, ids)[1]), ids
+    _, val, test = loaders(args.model, data, params)
+    batches = test if split == TEST else val[0]
+    return predict(model, batches if edit is None else edited(batches, edit), args.device)
+
+def pooled_data(args, block):
+    """ Return the source cities and the target as one dataset that trains on all of them and
+        stops and scores on the target.
+    """
+    return load_city([*args.sources, args.city], args.longest_gap, args.completeness,
+                     args.data_ablation, block).only_scored_on(args.city)
+
+def target_data(args, block, stats=None):
+    """ Return the target city (ablated), normalized with the source statistics in transfer.
+    """
+    return load_city(args.city, args.longest_gap, args.completeness, args.data_ablation, block,
+                     stats=stats)
+
+def variant_data(args, block, variant):
+    """ Return the data a saved variant was scored on.
+    """
+    if variant == "pooled" and args.model != "gbt":
+        return pooled_data(args, block)
+    stats = load_city(args.sources, args.longest_gap, args.completeness).stats if args.transfer else None
+    return target_data(args, block, stats)
+
+# LSTM / GNN / DLinear
+
+LOADERS = {}
 
 def loaders(model: str, data, params: dict):
-    """ Return (train(rng), val(), test()) batch factories for one dataset (cached).
+    """ Return (train(rng), [val() per validation city], test()) batch factories for one dataset
+        (cached).
     """
     key = (model, id(data), params.get("k"), params["batch_size"])
-    if key in _loaders:
-        return _loaders[key]
-    if model == "lstm":
-        ids = {s: data.split_window_ids(s) for s in (TRAIN, VAL, TEST)}
-        out = (lambda rng: lstm_batches(data, ids[TRAIN], params["batch_size"], rng),
-               lambda: lstm_batches(data, ids[VAL], config.EVAL_BATCH),
-               lambda: lstm_batches(data, ids[TEST], config.EVAL_BATCH))
-    else:
-        graphs = {s: GraphBatches(data, s, params["k"], params["batch_size"])
-                  for s in (TRAIN, VAL, TEST)}
-        out = (graphs[TRAIN], lambda: graphs[VAL](), lambda: graphs[TEST]())
-    _loaders[key] = out
-    return out
+    if key not in LOADERS:
+        train, val, test = (data.split_window_ids(TRAIN), data.split_by_city(VAL),
+                            data.split_window_ids(TEST))
+        if model == "gnn":
+            graphs = lambda ids: GraphBatches(data, ids, params["k"], params["batch_size"])
+            LOADERS[key] = (graphs(train), [graphs(ids) for ids in val], graphs(test))
+        else:
+            LOADERS[key] = (lambda rng: lstm_batches(data, train, params["batch_size"], rng),
+                             [partial(lstm_batches, data, ids, config.EVAL_BATCH) for ids in val],
+                             partial(lstm_batches, data, test, config.EVAL_BATCH))
+    return LOADERS[key]
 
 def build_nn(args, params):
-    """ Build an untrained LSTM/GNN with the given architecture.
+    """ Build an untrained model with the given architecture.
     """
+    if args.model == "dlinear":
+        return DLinear(params["kernel"])
     cls = LSTMForecaster if args.model == "lstm" else GNNForecaster
     return cls(len(ENCODER_COLS), len(DECODER_COLS), params["hidden"], params["layers"],
                config.DROPOUT, args.autoregressive)
 
 def load_nn(args, params, path):
-    """ Rebuild an LSTM/GNN and load saved weights.
+    """ Rebuild a model and load its saved weights.
     """
     model = build_nn(args, params)
-    model.load_state_dict(torch.load(path))
+    model.load_state_dict(torch.load(path, map_location=args.device))
     return model.to(args.device)
 
 def train_nn(args, params, data, seed, ckpt=None, init=None, freeze=False, lr=None,
              align=None, verbose=True, decay=True, save_to=None, label="TRAINING"):
-    """ Build and train an LSTM/GNN; return (model, best val RMSE). save_to keeps its weights.
+    """ Build and train a model; return (model, best val RMSE). save_to keeps its weights and
+        replaces the resume checkpoint.
     """
     seed_everything(seed)
     model = build_nn(args, params)
@@ -163,7 +172,9 @@ def train_nn(args, params, data, seed, ckpt=None, init=None, freeze=False, lr=No
                   decay, label)
     if save_to is not None:
         Path(save_to).parent.mkdir(parents=True, exist_ok=True)
-        torch.save(model.state_dict(), Path(save_to).with_suffix(".pt"))
+        torch.save(model.state_dict(), save_to)
+        if ckpt:
+            Path(ckpt).unlink(missing_ok=True)
     return model, min(h["val"] for h in history if h["tf"] == 0)
 
 def pretrain(args, arch, src, tgt, method, lam, seed, cdir, verbose):
@@ -178,33 +189,46 @@ def pretrain(args, arch, src, tgt, method, lam, seed, cdir, verbose):
     else:
         path = Path(cdir) / "pretrain" / f"mmd_lambda{lam}_{name}"
     if path.exists():
-        return torch.load(path)
+        return torch.load(path, map_location=args.device)
     if verbose:
-        print(f"    Pretraining on {CITIES[args.source]} ({method})")
+        print(f"    Pretraining on {names(args.sources)} ({method})")
         runlog.detail("PRETRAINING SETUP", {"method": method, "architecture": arch, "seed": seed,
-                                      "mmd lambda": lam, "saved to": path})
+                                            "mmd lambda": lam, "saved to": path})
     align = None
     if method == "mmd":
         align = (MMDAlignment(lam, warmup_steps=config.MMD_WARMUP_STEPS),
                  loaders(args.model, tgt, arch)[0])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ckpt = None if align else path.with_suffix(".ckpt")
-    model, _ = train_nn(args, arch, src, seed, ckpt=ckpt, align=align, verbose=verbose,
-                        label=f"PRETRAINING {method} on {CITIES[args.source]}")
-    torch.save(model.state_dict(), path)
+    model, _ = train_nn(args, arch, src, seed, ckpt=None if align else path.with_suffix(".ckpt"),
+                        align=align, verbose=verbose, save_to=path,
+                        label=f"PRETRAINING {method} on {names(args.sources)}")
     return model.state_dict()
 
-def finetune(args, arch, src, tgt, method, variant, ft, seed, cdir, ckpt=None, verbose=True,
+def finetune(args, arch, src, tgt, method, mode, ft, seed, cdir, ckpt=None, verbose=True,
              save_to=None):
     """ Fine-tune a pretrained model on the target; return (model, best val RMSE). Teacher
         forcing stays at 0: the pretrained decoder already runs on its own predictions.
     """
     init = pretrain(args, arch, src, tgt, method, ft.get("lambda"), seed, cdir, verbose)
     if verbose:
-        print(f"    Fine-tuning on {CITIES[args.city]} ({variant})")
-    return train_nn(args, arch, tgt, seed, ckpt, init=init, freeze=variant == "frozen",
+        print(f"    Fine-tuning on {CITIES[args.city]} ({mode})")
+    return train_nn(args, arch, tgt, seed, ckpt, init=init, freeze=mode == "frozen",
                     lr=ft["fine_tune_lr"], verbose=verbose, decay=False, save_to=save_to,
-                    label=f"FINE-TUNING {method}_{variant} on {CITIES[args.city]} {ft}")
+                    label=f"FINE-TUNING {method}_{mode} on {CITIES[args.city]} {ft}")
+
+def zero_shot(args, arch, src, tgt, seed, cdir, out):
+    """ Return the plainly pretrained source model, saved as this run's model.
+    """
+    model = build_nn(args, arch)
+    model.load_state_dict(pretrain(args, arch, src, tgt, "param", None, seed, cdir, True))
+    Path(out).mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), out / "model.pt")
+    return model.to(args.device)
+
+def load_model(args, params, seed, out):
+    """ Load a finished run's model from its folder.
+    """
+    return (load_gbt(args, params, seed, out / "trees") if args.model == "gbt"
+            else load_nn(args, params, out / "model.pt"))
 
 # GBT
 
@@ -214,10 +238,10 @@ def gbt_arrays(data, ids):
     _, x_dec, y = data.gather(ids)
     return data.lookback[ids], x_dec, y
 
-def train_gbt(args, params, data, seed, extra=None, ckpt=None, verbose=True, save_to=None,
-              label="TREES"):
-    """ Train a GBT on the training windows (plus weighted source windows); return (model, val RMSE).
-        extra = (lookback, x_dec, y, weight) appended for transfer; target windows weigh 1.
+def train_gbt(args, params, data, seed, extra=None, ckpt=None, verbose=True, label="TREES"):
+    """ Train a GBT on the training windows (plus weighted source windows); return (model, val
+        RMSE, the mean over validation cities). extra = (lookback, x_dec, y, weight) appended for
+        transfer; target windows weigh 1.
     """
     p = dict(params)
     rounds = p.pop("num_boost_round")
@@ -226,12 +250,13 @@ def train_gbt(args, params, data, seed, extra=None, ckpt=None, verbose=True, sav
     if extra is not None:
         weight = np.concatenate([np.ones(len(y)), extra[3]])
         lb, xd, y = (np.concatenate([a, b]) for a, b in zip((lb, xd, y), extra[:3]))
-    val = gbt_arrays(data, data.split_window_ids(VAL))
+    val_ids = data.split_window_ids(VAL)
+    val = gbt_arrays(data, val_ids)
     model = GBTForecaster(p, rounds, args.autoregressive, args.device, seed)
     model.fit(lb, xd, y, weight, val if verbose else None, ckpt, verbose, label)
-    if save_to is not None:
-        model.save(save_to)
-    return model, float(np.sqrt(np.mean((model.predict(*val[:2]) - val[2]) ** 2)))
+    error = (model.predict(*val[:2]) - val[2]) ** 2
+    city = data.city[data.station[val_ids]]
+    return model, float(np.mean([np.sqrt(error[city == c].mean()) for c in np.unique(city)]))
 
 def load_gbt(args, params, seed, path):
     """ Rebuild a GBT and load its saved models.
@@ -240,94 +265,76 @@ def load_gbt(args, params, seed, path):
     rounds = p.pop("num_boost_round")
     return GBTForecaster(p, rounds, args.autoregressive, args.device, seed).load(path)
 
-def gbt_test(model, data):
-    """ Predict the test windows; return (pred, ids).
-    """
-    ids = data.split_window_ids(TEST)
-    lb, xd, _ = gbt_arrays(data, ids)
-    return model.predict(lb, xd), ids
-
 # Configurations
 
 def run_plain(args, block):
     """ No transfer: tune on the city, then train and score every seed.
     """
-    data = load_city(args.city, args.longest_gap, args.completeness, args.data_ablation, block)
-    cdir = config_dir(args.model, args.city, None, args.autoregressive, run_tag(args, block))
+    data = target_data(args, block)
+    cdir = config_folder(args, block)
     gbt = args.model == "gbt"
     trainer = train_gbt if gbt else train_nn
-    print(f"[TUNE] {args.model.upper()} {CITIES[args.city]}")
-    best = tuned(args, cdir / "tuning.json",
-                 lambda p, m, s: trainer(args, p, data, s, verbose=False, save_to=m,
-                                         label=f"TUNING POINT {p}")[1],
+    best = tuned(f"{args.model.upper()} {CITIES[args.city]}", cdir / "tuning.json",
+                 lambda p, s: trainer(args, p, data, s, verbose=False,
+                                      label=f"TUNING POINT {p}")[1],
                  load_grid()[args.model])
     params = best["params"]
-
     for seed in args.seed:
-        out = cdir / "none" / f"seed{seed}"
-        print(header(args, block, seed))
-        if (out / "metrics.json").exists():
-            print("    Done (skipped)")
-            continue
-        saved = reusable(best, seed, "" if gbt else ".pt")
-        if saved:
-            print("    Reusing the model trained while tuning (same seed and data)")
-        if gbt:
-            model = (load_gbt(args, params, seed, saved) if saved else
-                     train_gbt(args, params, data, seed, ckpt=out / "trees")[0])
-            pred, ids = gbt_test(model, data)
-        else:
-            model = (load_nn(args, params, saved) if saved else
-                     train_nn(args, params, data, seed, ckpt=out / "checkpoint.pt")[0])
-            pred, ids = predict(model, loaders(args.model, data, params)[2], args.device)
-        save_json(out / "params.json", params)
-        report(out, data, ids, pred)
+        train = ((lambda out: train_gbt(args, params, data, seed, ckpt=out / "trees")[0]) if gbt else
+                 (lambda out: train_nn(args, params, data, seed, ckpt=out / "checkpoint.pt",
+                                       save_to=out / "model.pt")[0]))
+        run_seed(args, block, "none", seed, cdir / "none" / f"seed{seed}", data, params, train)
+
+def nn_variant(args, variant, src, tgt, arch, cdir, block):
+    """ Return (scored data, architecture and fine-tuning settings, train(seed, out)) for one
+        LSTM / GNN transfer variant, tuning what the variant needs.
+    """
+    grid = load_grid()
+    if variant == "zeroshot":
+        return tgt, arch, lambda seed, out: zero_shot(args, arch, src, tgt, seed, cdir, out)
+    title = f"{args.model.upper()} {names(args.sources)}"
+    if variant == "pooled":
+        data = pooled_data(args, block)
+        best = tuned(f"{title} + {CITIES[args.city]}, pooled", cdir / variant / "tuning.json",
+                     lambda p, s: train_nn(args, p, data, s, verbose=False,
+                                           label=f"TUNING POINT pooled {p}")[1], grid[args.model])
+        train = lambda seed, out: train_nn(args, best["params"], data, seed,
+                                           ckpt=out / "checkpoint.pt", save_to=out / "model.pt")[0]
+        return data, best["params"], train
+    method, mode = variant.split("_")
+    ft_grid = {**grid["fine_tune"], **(grid["mmd"] if method == "mmd" else {})}
+    best = tuned(f"{title} -> {CITIES[args.city]}, {variant}", cdir / variant / "tuning.json",
+                 lambda p, s: finetune(args, arch, src, tgt, method, mode, p, s, cdir,
+                                       verbose=False)[1], ft_grid)
+    train = lambda seed, out: finetune(args, arch, src, tgt, method, mode, best["params"], seed,
+                                       cdir, ckpt=out / "checkpoint.pt",
+                                       save_to=out / "model.pt")[0]
+    return tgt, {**arch, **best["params"]}, train
 
 def run_transfer_nn(args, block):
-    """ LSTM/GNN transfer: architecture tuned on the source; param and MMD pretraining, each
-        fine-tuned frozen and/or full on the target.
+    """ LSTM/GNN transfer: the source architecture is tuned once; each variant then tunes its own
+        settings. Zero-shot applies the pretrained source model as is, pooled trains from scratch
+        on source and target together, and the rest fine-tune a param or MMD pretrained model.
     """
-    src = load_city(args.source, args.longest_gap, args.completeness)
-    tgt = load_city(args.city, args.longest_gap, args.completeness, args.data_ablation, block,
-                    stats=src.stats)
-    # The source is never ablated: its architecture is tuned like a plain source run's.
-    src_dir = config_dir(args.model, args.source, None, args.autoregressive,
-                         settings_tag(args.longest_gap, args.completeness))
-    cdir = config_dir(args.model, args.city, args.source, args.autoregressive, run_tag(args, block))
-    grid = load_grid()
-
-    print(f"[TUNE] {args.model.upper()} {CITIES[args.source]} (source architecture)")
-    arch = tuned(args, src_dir / "tuning.json",
-                 lambda p, m, s: train_nn(args, p, src, s, verbose=False, save_to=m,
-                                          label=f"TUNING POINT (source) {p}")[1],
-                 grid[args.model])["params"]
-
-    variants = transfer.VARIANTS if args.training_variant == "all" else (args.training_variant,)
-    for method in METHODS:
-        for variant in variants:
-            name = f"{method}_{variant}"
-            ft_grid = {**grid["fine_tune"], **(grid["mmd"] if method == "mmd" else {})}
-            print(f"[TUNE] {args.model.upper()} {CITIES[args.source]} -> {CITIES[args.city]}, {name}")
-            best = tuned(args, cdir / name / "tuning.json",
-                         lambda p, m, s: finetune(args, arch, src, tgt, method, variant, p,
-                                                  s, cdir, verbose=False, save_to=m)[1],
-                         ft_grid)
-            for seed in args.seed:
-                out = cdir / name / f"seed{seed}"
-                print(header(args, block, seed, name))
-                if (out / "metrics.json").exists():
-                    print("    Done (skipped)")
-                    continue
-                saved = reusable(best, seed, ".pt")
-                if saved:
-                    print("    Reusing the model trained while tuning (same seed and data)")
-                    model = load_nn(args, arch, saved)
-                else:
-                    model = finetune(args, arch, src, tgt, method, variant, best["params"], seed,
-                                     cdir, ckpt=out / "checkpoint.pt")[0]
-                pred, ids = predict(model, loaders(args.model, tgt, arch)[2], args.device)
-                save_json(out / "params.json", {**arch, **best["params"]})
-                report(out, tgt, ids, pred)
+    src = load_city(args.sources, args.longest_gap, args.completeness)
+    tgt = target_data(args, block, src.stats)
+    cdir = config_folder(args, block)
+    todo = variants(args)
+    arch = None
+    if todo != ["pooled"]:
+        # The source is never ablated: its architecture is tuned like a plain source run's.
+        src_dir = config_dir(args.model, args.source, None, args.autoregressive,
+                             settings_tag(args.longest_gap, args.completeness))
+        arch = tuned(f"{args.model.upper()} {names(args.sources)} (source architecture)",
+                     src_dir / "tuning.json",
+                     lambda p, s: train_nn(args, p, src, s, verbose=False,
+                                           label=f"TUNING POINT (source) {p}")[1],
+                     load_grid()[args.model])["params"]
+    for variant in todo:
+        data, params, train = nn_variant(args, variant, src, tgt, arch, cdir, block)
+        for seed in args.seed:
+            run_seed(args, block, variant, seed, cdir / variant / f"seed{seed}", data, params,
+                     partial(train, seed))
 
 def source_distances(args, src, tgt, cdir) -> dict:
     """ Return each source station's MMD distance to the target's training rows, measured once per
@@ -337,109 +344,92 @@ def source_distances(args, src, tgt, cdir) -> dict:
     saved = load_json(path)
     if saved is not None:
         return {k: np.asarray(v) for k, v in saved.items()}
-    print(f"    Measuring station distances: {CITIES[args.source]} -> {CITIES[args.city]}")
+    print(f"    Measuring station distances: {names(args.sources)} -> {CITIES[args.city]}")
     # The fixed bandwidth is pooled from every city except the target, as in the distance study.
-    pool = {c: src if c == args.source else load_city(c, args.longest_gap, args.completeness)
+    pool = {c: transfer.training_rows(src, c)[0] if c in args.sources else
+            transfer.training_rows(load_city(c, args.longest_gap, args.completeness))[0]
             for c in CITIES if c != args.city}
     dist = transfer.station_distances(src, tgt, pool)
     save_json(path, {k: v.tolist() for k, v in dist.items()})
     return dist
 
-def run_transfer_gbt(args, block):
-    """ GBT transfer: the target's training windows plus the source's, either pooled (every source
-        window weighs 1) or weighted (each source station by exp(-d_s / tau), from its MMD distance
-        to the target). Each variant tunes its own tree settings on the data it trains on; the
-        weighted variant tunes tau jointly with them, for this source-target pair only.
+def gbt_variant(args, variant, src, tgt, cdir):
+    """ Return (saved settings, train(seed, out)) for one GBT transfer variant, tuning what it
+        needs. Zero-shot trains on the source alone; pooled adds every source window at weight 1;
+        weighted adds each source station at exp(-d / tau), tuning tau jointly with the trees for
+        this source-target pair.
     """
-    src = load_city(args.source, args.longest_gap, args.completeness)
-    tgt = load_city(args.city, args.longest_gap, args.completeness, args.data_ablation, block,
-                    stats=src.stats)
-    cdir = config_dir("gbt", args.city, args.source, args.autoregressive, run_tag(args, block))
     grid = load_grid()
+    title = f"GBT {names(args.sources)}"
+    if variant == "zeroshot":
+        src_dir = config_dir("gbt", args.source, None, args.autoregressive,
+                             settings_tag(args.longest_gap, args.completeness))
+        best = tuned(f"{title} (source trees)", src_dir / "tuning.json",
+                     lambda p, s: train_gbt(args, p, src, s, verbose=False,
+                                            label=f"TUNING POINT (source) {p}")[1], grid["gbt"])
+        return best["params"], lambda seed, out: train_gbt(args, best["params"], src, seed,
+                                                           ckpt=out / "trees")[0]
     ids = src.split_window_ids(TRAIN)
     source_arrays = gbt_arrays(src, ids)
     trees = lambda p: {k: v for k, v in p.items() if k != "tau_scale"}
+    if variant == "pooled":
+        space, tau_of = grid["gbt"], lambda p: None
+        weight_of = lambda p: np.ones(len(ids))
+    else:
+        dist = source_distances(args, src, tgt, cdir)
+        median = transfer.tau_grid(dist, [1.0])[0]   # tau = median station distance x scale
+        space = {**grid["gbt"], "tau_scale": grid["tau_scales"]}
+        tau_of = lambda p: median * p["tau_scale"]
+        weight_of = lambda p: transfer.gbt_weights(src, ids, dist, tau_of(p))
+    best = tuned(f"{title} -> {CITIES[args.city]}, {variant}", cdir / variant / "tuning.json",
+                 lambda p, s: train_gbt(args, trees(p), tgt, s, (*source_arrays, weight_of(p)),
+                                        verbose=False, label=f"TUNING POINT {variant} {p}")[1],
+                 space)
+    params, weights = best["params"], weight_of(best["params"])
+    station_weight = pd.Series(weights).groupby(src.station[ids]).first()
+    table = pd.DataFrame({"station": src.keys[station_weight.index],
+                          "windows": pd.Series(src.station[ids]).value_counts()[station_weight.index].to_numpy(),
+                          "weight": station_weight.round(6).to_numpy()})
+    if variant == "weighted":
+        table = table.join(pd.DataFrame({k: v for k, v in dist.items() if k != "station"},
+                                        index=src.keys[dist["station"]]).round(6), on="station")
+    runlog.detail(f"SOURCE WEIGHTS {names(args.sources)} -> {CITIES[args.city]}, {variant}",
+                  {"tau": tau_of(params), "tree settings": trees(params),
+                   "source windows": len(ids),
+                   "effective source windows": round(float(weights.sum()), 1)}, table)
+    train = lambda seed, out: train_gbt(args, trees(params), tgt, seed,
+                                        (*source_arrays, weights), ckpt=out / "trees")[0]
+    return {**params, "tau": tau_of(params)}, train
 
-    variants = transfer.GBT_VARIANTS if args.training_variant == "all" else (args.training_variant,)
-    for variant in variants:
-        if variant == "pooled":
-            space, tau_of = grid["gbt"], lambda p: None
-            weight_of = lambda p: np.ones(len(ids))
-        else:
-            dist = source_distances(args, src, tgt, cdir)
-            median = transfer.tau_grid(dist, [1.0])[0]   # tau = median station distance x scale
-            space, tau_of = {**grid["gbt"], "tau_scale": grid["tau_scales"]}, lambda p: median * p["tau_scale"]
-            weight_of = lambda p: transfer.gbt_weights(src, ids, dist, tau_of(p))
-
-        print(f"[TUNE] GBT {CITIES[args.source]} -> {CITIES[args.city]}, {variant}")
-        best = tuned(args, cdir / variant / "tuning.json",
-                     lambda p, m, s: train_gbt(args, trees(p), tgt, s, (*source_arrays, weight_of(p)),
-                                               verbose=False, save_to=m,
-                                               label=f"TUNING POINT {variant} {p}")[1], space)
-        params = best["params"]
-        weights = weight_of(params)
-        station_weight = pd.Series(weights).groupby(src.station[ids]).first()
-        table = pd.DataFrame({"station": src.keys[station_weight.index],
-                              "windows": pd.Series(src.station[ids]).value_counts()[station_weight.index].to_numpy(),
-                              "weight": station_weight.round(6).to_numpy()})
-        if variant == "weighted":
-            d = pd.DataFrame({k: v for k, v in dist.items() if k != "station"},
-                             index=src.keys[dist["station"]])
-            table = table.join(d.round(6), on="station")
-        runlog.detail(f"SOURCE WEIGHTS {CITIES[args.source]} -> {CITIES[args.city]}, {variant}",
-                      {"tau": tau_of(params), "tree settings": trees(params),
-                       "source windows": len(ids), "effective source windows": round(float(weights.sum()), 1)},
-                      table)
+def run_transfer_gbt(args, block):
+    """ GBT transfer: each variant tunes its own tree settings on the data it trains on.
+    """
+    src = load_city(args.sources, args.longest_gap, args.completeness)
+    tgt = target_data(args, block, src.stats)
+    cdir = config_folder(args, block)
+    for variant in variants(args):
+        params, train = gbt_variant(args, variant, src, tgt, cdir)
         for seed in args.seed:
-            out = cdir / variant / f"seed{seed}"
-            print(header(args, block, seed, variant))
-            if (out / "metrics.json").exists():
-                print("    Done (skipped)")
-                continue
-            saved = reusable(best, seed)
-            if saved:
-                print("    Reusing the model trained while tuning (same seed and data)")
-            model = (load_gbt(args, trees(params), seed, saved) if saved else
-                     train_gbt(args, trees(params), tgt, seed, (*source_arrays, weight_of(params)),
-                               ckpt=out / "trees")[0])
-            pred, test_ids = gbt_test(model, tgt)
-            save_json(out / "params.json", {**params, "tau": tau_of(params)})
-            report(out, tgt, test_ids, pred)
+            run_seed(args, block, variant, seed, cdir / variant / f"seed{seed}", tgt, params,
+                     partial(train, seed))
 
 def baselines_and_comparison(args):
-    """ Score persistence and climatology on the same test windows (once per filter setting),
-        then print this city's comparison.
+    """ Score the cheap baselines on the same test windows (once per filter setting), then print
+        this city's comparison.
     """
     tag = settings_tag(args.longest_gap, args.completeness)
-    for name, module in (("persistence", persistence), ("climatology", climatology)):
+    for name, module in (("persistence", persistence), ("climatology", climatology),
+                         ("ridge", ridge)):
         if not (ROOT / "baselines" / name / args.city / tag / "test" / "metrics.json").exists():
             module.run(args.city, args.longest_gap, args.completeness)
-    table = compare(args.city)
+    table = compare(all_runs(args.city))
     print_table(table[table["filters"] == f"gap{args.longest_gap}_comp{args.completeness}"])
-
-def main():
-    args = parse_args()
-    pair = f"{args.source}-{args.city}" if args.transfer else args.city
-    path = runlog.start(ROOT / "logs", f"{args.model}_{pair}_{'ar' if args.autoregressive else 'direct'}_"
-                        f"{settings_tag(args.longest_gap, args.completeness, args.data_ablation)}")
-    try:
-        runlog.detail("RUN", {"command": " ".join(sys.argv), **vars(args), **runlog.environment(),
-                              **{f"copy of {c}": f"{copy_path(c)} (modified "
-                                 f"{datetime.fromtimestamp(copy_path(c).stat().st_mtime):%Y-%m-%d %H:%M:%S})"
-                                 for c in CITIES if copy_path(c).exists()}})
-        runlog.detail("CONFIG", {k: v for k, v in vars(config).items() if k.isupper()})
-        run(args)
-    finally:
-        runlog.stop()
-        print(f"Log: {path}")
 
 def run(args):
     """ Run every block of the configuration, then the baselines and the comparison.
     """
-    blocks = [0] if args.data_ablation == 100 else (
-        [0, 1, 2] if args.block == "all" else [int(args.block)])
-    for block in blocks:
-        _loaders.clear()  # drop the previous block's data and batches
+    for block in blocks(args):
+        LOADERS.clear()  # drop the previous block's data and batches
         if not args.transfer:
             run_plain(args, block)
         elif args.model == "gbt":
@@ -447,6 +437,17 @@ def run(args):
         else:
             run_transfer_nn(args, block)
     baselines_and_comparison(args)
+
+def main():
+    ap = argparse.ArgumentParser()
+    add_arguments(ap)
+    ap.add_argument("--seed", type=lambda t: [int(s) for s in t.split(",")],
+                    default=config.DEFAULT_SEEDS)
+    args = read_arguments(ap)
+    if config.TUNING_SEED in args.seed:
+        ap.error(f"seed {config.TUNING_SEED} tunes the hyperparameters and is not a result seed")
+    with runlog.logged(f"{args.model}_{args.source + '-' if args.transfer else ''}{args.city}", args):
+        run(args)
 
 if __name__ == "__main__":
     main()

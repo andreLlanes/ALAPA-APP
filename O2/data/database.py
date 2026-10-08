@@ -1,11 +1,12 @@
 """ Copy the database to local files (one per city), so runs read the copy and never query the
     database again. Recopy only after the database changes.
-    python -m data.database             copy if missing
-    python -m data.database --refresh   recopy everything
+    python data/database.py             copy if missing
+    python data/database.py --refresh   recopy everything
 """
 
 import argparse
 import os
+import sys
 import tempfile
 from contextlib import closing
 from pathlib import Path
@@ -14,11 +15,16 @@ import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
 
+# Put the O2 root on the path so this file imports the same whether it is run as a script
+# (python data/database.py) or as a module (python -m data.database).
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from Common.schema import KEY_COL, TIME_COL
+from utils import runlog
+from utils.artifacts import COPY_DIR
 
 CITIES = {"mm": "Metro Manila", "bk": "Bangkok", "la": "Los Angeles"}
 TABLE = "openaq.merged_clean"
-COPY_DIR = Path(__file__).resolve().parent / "cache"
 
 def copy_path(city: str) -> Path:
     """ Return the path of a city's copy of the database (data/cache/<city>.parquet).
@@ -75,5 +81,7 @@ def read_copy(city: str, columns=None) -> pd.DataFrame:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--refresh", action="store_true", help="recopy after the database changed")
-    print("[DATA] Copying Database")
-    copy_database(ap.parse_args().refresh)
+    args = ap.parse_args()
+    with runlog.logged("database", args):
+        print("[DATA] Copying Database")
+        copy_database(args.refresh)

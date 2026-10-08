@@ -3,22 +3,29 @@
     and a paired Wilcoxon test of each row against the best row, station by station
     (Holm-adjusted within each city and filter setting).
     Writes artifacts/comparison.csv.
+    python -m evals.eval [--city mm]
 """
 
 import argparse
 import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy.stats import t, wilcoxon
+
+import sys
+
+# Put the O2 root on the import path, so this file runs as a script or as a module.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import config
 from Common.metrics import METRIC_NAMES
 from data.database import CITIES
-from utils.artifacts import ROOT, load_json
+from utils.artifacts import ROOT, load_json, read_predictions
 
-MODELS = ("lstm", "gnn", "gbt")
-BASELINES = ("persistence", "climatology")
+MODELS = ("lstm", "gnn", "gbt", "dlinear")
+BASELINES = ("persistence", "climatology", "ridge")
 KEYS = ["city", "settings", "method", "decoder", "source", "variant"]
 
 def flatten(summary: dict) -> dict:
@@ -56,34 +63,71 @@ def baseline_runs() -> pd.DataFrame:
                          **flatten(load_json(path))})
     return pd.DataFrame(rows)
 
-def compare(city=None) -> pd.DataFrame:
-    """ Average each configuration over its seeds and place the baselines beside it.
+def all_runs(city=None) -> pd.DataFrame:
+    """ One row per trained seed and per baseline result, with its data filters.
     """
     runs = pd.concat([model_runs(), baseline_runs()], ignore_index=True)
-    if runs.empty:
-        return runs
     if city:
         runs = runs[runs["city"] == city]
-    values = list(METRIC_NAMES) + ["rmse_seen", "rmse_unseen"]
-    table = runs.groupby(KEYS, dropna=False)[values].mean()
-    table["rmse_sd"] = runs.groupby(KEYS, dropna=False)["rmse"].std()
-    table["seeds"] = runs.groupby(KEYS, dropna=False)["rmse"].count()
     # Baselines are stored per gap/completeness; ablation does not change the test set.
+    runs["filters"] = runs["settings"].str.extract(r"(gap\d+_comp\d+)", expand=False)
+    return runs
+
+def interval(mean, sd, n):
+    """ Return the CI_LEVEL confidence interval of a mean over n seeds.
+    """
+    half = t.ppf((1 + config.CI_LEVEL) / 2, (n - 1).clip(lower=1)) * sd / np.sqrt(n)
+    return mean - half, mean + half
+
+def compare(runs: pd.DataFrame) -> pd.DataFrame:
+    """ Average each configuration over its seeds and place the baselines beside it.
+    """
+    if runs.empty:
+        return runs
+    values = list(METRIC_NAMES) + ["rmse_seen", "rmse_unseen"]
+    grouped = runs.groupby(KEYS + ["filters"], dropna=False)
+    table = grouped[values].mean()
+    table["rmse_sd"], table["seeds"] = grouped["rmse"].std(), grouped["rmse"].count()
+    table["rmse_ci_low"], table["rmse_ci_high"] = interval(table["rmse"], table["rmse_sd"], table["seeds"])
     table = table.reset_index()
-    table["filters"] = table["settings"].str.extract(r"(gap\d+_comp\d+)", expand=False)
     table["p_vs_best"] = paired_tests(table, station_rmse(runs))
     return table.sort_values(["city", "filters", "settings", "rmse"]).reset_index(drop=True)
 
-def station_rmse(runs: pd.DataFrame) -> dict:
-    """ Return {configuration: RMSE per scored station}, averaged over the configuration's seeds.
+def station_rmse(runs: pd.DataFrame, lead=None) -> dict:
+    """ Return {configuration: RMSE per scored station}, averaged over the configuration's seeds,
+        overall or at one forecast lead.
     """
     frames = []
     for run in runs.itertuples():
-        s = pd.read_csv(f"{run.dir}/stations.csv")
-        s = s[s["scored"]][["location_key", "rmse"]]
-        frames.append(s.assign(**{k: getattr(run, k) for k in KEYS}))
+        scored = pd.read_csv(f"{run.dir}/stations.csv").query("scored")
+        rmse = scored[["location_key", "rmse"]] if lead is None else (
+            pd.read_csv(f"{run.dir}/by_lead.csv").query("lead == @lead")
+            .merge(scored[["location_key"]])[["location_key", "rmse"]])
+        frames.append(rmse.assign(**{k: getattr(run, k) for k in KEYS}))
     means = pd.concat(frames).groupby(KEYS + ["location_key"], dropna=False)["rmse"].mean()
     return {key: group.droplevel(KEYS) for key, group in means.groupby(level=KEYS, dropna=False)}
+
+def load_group(group: pd.DataFrame) -> dict:
+    """ Load the saved predictions of one configuration's seeds, which share their windows:
+        keys, origin, obs [n,72], pred [seeds,n,72], and the mean of the seeds' validation
+        predictions with their observations (None when not saved).
+    """
+    first, preds, val_sum, val_obs = None, [], None, None
+    has_val = all((Path(path) / "val_predictions.npz").exists() for path in group["dir"])
+    for path in group["dir"]:
+        keys, origin, pred, obs = read_predictions(f"{path}/predictions.npz")
+        if first is None:
+            first = (keys, origin, obs)
+        elif not (np.array_equal(keys, first[0]) and np.array_equal(origin, first[1])):
+            raise ValueError(f"{path}: test windows differ between seeds")
+        preds.append(pred)
+        if has_val:
+            *_, val_pred, val_obs = read_predictions(f"{path}/val_predictions.npz")
+            val_sum = val_pred.astype(np.float32) + (0 if val_sum is None else val_sum)
+    return {"keys": first[0], "origin": first[1], "obs": first[2].astype(np.float32),
+            "pred": np.stack(preds),
+            "val_pred": val_sum / len(preds) if has_val else None,
+            "val_obs": val_obs.astype(np.float32) if has_val else None}
 
 def holm(p: np.ndarray) -> np.ndarray:
     """ Holm-adjust a set of p-values for multiple comparisons (NaNs stay NaN).
@@ -120,11 +164,12 @@ def print_table(table: pd.DataFrame):
         gap, comp = re.findall(r"\d+", filters)
         print(f"[EVAL] {CITIES[city]} (longest gap: {gap}, station completeness: {comp})")
         for r in group.itertuples():
-            ablation = r.settings.split("_", 2)[-1] if r.method in ("LSTM", "GNN", "GBT") else ""
-            source = f"{r.source}->" if r.source else ""
+            ablation = r.settings.split("_", 2)[-1] if r.method.lower() in MODELS else ""
             variant = r.variant if r.variant not in ("", "none") else ""
-            name = " ".join(x for x in (r.method, r.decoder, source, variant, ablation) if x)
-            sd = f" +/- {r.rmse_sd:.3f}" if r.seeds > 1 else ""
+            route = f"{r.source}->{variant}" if r.source else variant
+            name = " ".join(x for x in (r.method, r.decoder, route, ablation) if x)
+            sd = (f" +/- {r.rmse_sd:.3f} [{r.rmse_ci_low:.3f}, {r.rmse_ci_high:.3f}]"
+                  if r.seeds > 1 else "")
             p = "best" if np.isnan(r.p_vs_best) and r.rmse == group["rmse"].min() else f"p = {r.p_vs_best:.3f}"
             print(f"    {name:<44} RMSE {r.rmse:.3f}{sd} | MAE {r.mae:.3f} | MBE {r.mbe:+.3f} | "
                   f"IOA {r.ioa:.3f} | seen {r.rmse_seen:.3f} | unseen {r.rmse_unseen:.3f} | {p}")
@@ -132,7 +177,7 @@ def print_table(table: pd.DataFrame):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--city", choices=list(CITIES))
-    table = compare(ap.parse_args().city)
+    table = compare(all_runs(ap.parse_args().city))
     if table.empty:
         raise SystemExit("[EVAL] no results yet")
     table.to_csv(ROOT / "comparison.csv", index=False)

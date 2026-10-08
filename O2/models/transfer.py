@@ -11,8 +11,12 @@ from Common.splits import TRAIN
 from data.load import covered_rows
 from models import mmd
 
-VARIANTS = ("frozen", "full")            # LSTM / GNN fine-tuning
-GBT_VARIANTS = ("pooled", "weighted")    # GBT: source weight 1, or exp(-d / tau)
+# zeroshot: the source model applied to the target as is. pooled: source and target windows mixed
+# (from scratch for LSTM / GNN, source weight 1 for GBT). <method>_<frozen|full>: LSTM / GNN
+# pretrained by param transfer or MMD alignment, then fine-tuned. weighted: GBT source windows
+# weighted exp(-d / tau).
+NN_VARIANTS = ("zeroshot", "pooled", "param_frozen", "param_full", "mmd_frozen", "mmd_full")
+GBT_VARIANTS = ("zeroshot", "pooled", "weighted")
 
 def freeze_encoder(model):
     """ Prepare a pretrained model for the frozen variant: the encoder keeps its source weights,
@@ -21,11 +25,13 @@ def freeze_encoder(model):
     for p in model.encoder.parameters():
         p.requires_grad = False
 
-def training_rows(data):
-    """ Return the raw [PM2.5, met, time] rows covered by the city's training windows that have an
-        observed PM2.5, and the station of each row.
+def training_rows(data, city=None):
+    """ Return the raw [PM2.5, met, time] rows covered by training windows that have an observed
+        PM2.5 (those of one city of a pooled dataset, if given), and the station of each row.
     """
     rows = covered_rows(data.start[data.split_window_ids(TRAIN)], len(data.pm)) & ~np.isnan(data.pm)
+    if city is not None:
+        rows &= data.city[data.row_station] == city
     s = data.stats
     pm = data.pm[rows] * s.pm_std + s.pm_mean
     feat = data.feat[rows] * s.feat_std + s.feat_mean
@@ -42,21 +48,20 @@ def _draw(a, n, rng):
     """
     return a if len(a) <= n else a[np.sort(rng.choice(len(a), n, replace=False))]
 
-def station_distances(source, target, pool: dict = None) -> dict:
+def station_distances(source, target, pool: dict) -> dict:
     """ Measure each source station's MMD^2 to the target city's training hours, standardized by
         the target's training statistics. Returns per-station arrays: station, n_rows, mmd2_pair
         (bandwidth per station pair) and mmd2_fixed (one bandwidth shared by every station), each
         with its sd over the repeats. Stations with too few complete hours are left out.
-        pool = {city: data} of every source city: the fixed bandwidth is pooled from the target
-        and all of them, so fixed distances are comparable across source cities.
+        pool = {city: raw training rows} of every city but the target: the fixed bandwidth is
+        pooled from the target and all of them, so fixed distances are comparable across sources.
     """
     x_target, _ = training_rows(target)
     x_source, row_station = training_rows(source)
     mu, sd = x_target.mean(0), x_target.std(0)
     sd[sd == 0] = 1.0
     x_target, x_source = (x_target - mu) / sd, (x_source - mu) / sd
-    pool_rows = {city: (training_rows(data)[0] - mu) / sd
-                 for city, data in sorted((pool or {"source": source}).items())}
+    pool_rows = {city: (rows - mu) / sd for city, rows in sorted(pool.items())}
 
     stations, counts = np.unique(row_station, return_counts=True)
     enough = counts >= config.DISTANCE_MIN_ROWS

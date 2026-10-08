@@ -14,6 +14,7 @@ from Common.schema import HORIZON_H
 from Common.splits import TRAIN
 
 ROOT = Path(__file__).resolve().parents[1] / "artifacts"
+COPY_DIR = Path(__file__).resolve().parents[1] / "data" / "cache"
 
 def settings_tag(longest_gap, completeness, ablation=100, block=0) -> str:
     """ Name the data settings of a run, e.g. gap6_comp70_abl25_block1.
@@ -93,21 +94,73 @@ def summarize(stations, curve) -> dict:
             "unseen": average(scored[~scored["seen"]]),
             "rmse_lead1": edge(0), f"rmse_lead{HORIZON_H}": edge(-1)}
 
-def save_scores(directory, data, ids, pred):
-    """ Save one run's test predictions (ug/m3) and its scores; return the summary.
-        pred is normalized, in the order of ids.
+def print_summary(s: dict):
+    """ Print a run's station-averaged scores and its first and last lead.
+    """
+    print(f"    RMSE {s['rmse']:.3f} +/- {s['rmse_sd']:.3f} | MAE {s['mae']:.3f} | "
+          f"MBE {s['mbe']:+.3f} | IOA {s['ioa']:.3f}")
+    print(f"    lead 1h RMSE {s['rmse_lead1']:.3f} -> lead {HORIZON_H}h RMSE "
+          f"{s[f'rmse_lead{HORIZON_H}']:.3f}")
+
+def write_predictions(path, data, ids, pred, obs):
+    """ Save a split's predictions and observations (ug/m3) in the stored precision.
+    """
+    dtype = config.STORED_PREDICTION_DTYPE
+    np.savez_compressed(path, location_key=data.keys[data.station[ids]], origin=data.origin[ids],
+                        pred=pred.astype(dtype), obs=obs.astype(dtype))
+
+def write_tables(directory, stations, by_lead, curve, summary):
+    """ Write the per-station, per-lead and station-averaged score tables and the summary.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    stations.to_csv(directory / "stations.csv", index=False)
+    by_lead.to_csv(directory / "by_lead.csv", index=False)
+    curve.to_csv(directory / "lead_curve.csv", index=False)
+    save_json(directory / "metrics.json", summary)
+
+def save_scores(directory, data, ids, pred, val_ids=None, val_pred=None):
+    """ Save one run's test predictions (ug/m3) and its scores; return the summary. Predictions
+        are normalized, in the order of their window ids. The validation predictions are saved
+        too, for the conformal intervals.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     pred = data.stats.inverse_y(pred)
     obs = data.stats.inverse_y(data.gather(ids)[2])
-    np.savez_compressed(directory / "predictions.npz", location_key=data.keys[data.station[ids]],
-                        origin=data.origin[ids], pred=pred.astype(np.float32),
-                        obs=obs.astype(np.float32))
+    write_predictions(directory / "predictions.npz", data, ids, pred, obs)
+    if val_pred is not None:
+        write_predictions(directory / "val_predictions.npz", data, val_ids,
+                          data.stats.inverse_y(val_pred), data.stats.inverse_y(data.gather(val_ids)[2]))
     stations, by_lead, curve, summary = station_scores(data.keys, data.station[ids], pred, obs,
                                                        seen_stations(data))
-    stations.to_csv(directory / "stations.csv", index=False)
-    by_lead.to_csv(directory / "by_lead.csv", index=False)
-    curve.to_csv(directory / "lead_curve.csv", index=False)
-    save_json(directory / "metrics.json", summary)
+    write_tables(directory, stations, by_lead, curve, summary)
     return summary
+
+def read_predictions(path):
+    """ Load saved predictions: (station keys, origins, predictions, observations), the last two
+        [n,72] in the stored precision.
+    """
+    with np.load(path) as f:
+        return f["location_key"], f["origin"], f["pred"], f["obs"]
+
+def station_codes(station):
+    """ Number the stations of a split's windows 0..S-1 and flag the scored ones (enough windows).
+    """
+    names, codes = np.unique(station, return_inverse=True)
+    return codes, np.bincount(codes, minlength=len(names)) >= config.MIN_TEST_WINDOWS
+
+def station_rmse(station, error):
+    """ RMSE of [n,72] errors (NaN skipped), averaged over the scored stations with equal weight:
+        returns (per lead [72], overall).
+    """
+    codes, scored = station_codes(station)
+    grouped = pd.DataFrame(np.square(error)).groupby(codes)
+    total, count = grouped.sum().loc[scored], grouped.count().loc[scored]
+    return np.sqrt(total / count).mean().to_numpy(), float(np.sqrt(total.sum(1) / count.sum(1)).mean())
+
+def station_mean(station, values):
+    """ Mean of [n,k] values (NaN skipped) per station, then over the scored stations: [k].
+    """
+    codes, scored = station_codes(station)
+    return pd.DataFrame(values).groupby(codes).mean().loc[scored].mean().to_numpy()

@@ -4,10 +4,11 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import xgboost as xgb
 
 from Common.schema import HORIZON_H
-from data.load import gbt_features
+from data.load import GBT_FEATURES, gbt_features
 from utils import runlog
 
 class GBTForecaster:
@@ -23,10 +24,11 @@ class GBTForecaster:
         self.boosters = []
 
     @staticmethod
-    def features(lookback, x_dec_hour):
+    def matrix(lookback, x_dec_hour, y=None, weight=None):
         """ Build one row per window: lookback lags/rolling stats + met/time of the hour predicted.
         """
-        return np.column_stack([gbt_features(lookback), x_dec_hour])
+        return xgb.DMatrix(np.column_stack([gbt_features(lookback), x_dec_hour]), y, weight=weight,
+                           feature_names=GBT_FEATURES)
 
     def fit(self, lookback, x_dec, y, weight=None, val=None, ckpt_dir=None, verbose=True,
             label="TREES"):
@@ -45,10 +47,10 @@ class GBTForecaster:
                 self.boosters.append(xgb.Booster(model_file=str(path)))
                 scores.append({"model": h + 1, "note": "loaded from checkpoint"})
                 continue
-            dtrain = xgb.DMatrix(self.features(lookback, x_dec[:, h]), y[:, h], weight=weight)
+            dtrain = self.matrix(lookback, x_dec[:, h], y[:, h], weight)
             evals = [(dtrain, "train")]
             if val is not None:
-                evals.append((xgb.DMatrix(self.features(val[0], val[1][:, h]), val[2][:, h]), "val"))
+                evals.append((self.matrix(val[0], val[1][:, h], val[2][:, h]), "val"))
             log = {}
             booster = xgb.train({**self.params, "eval_metric": "rmse"}, dtrain, self.rounds,
                                 evals=evals, evals_result=log, verbose_eval=False)
@@ -67,24 +69,25 @@ class GBTForecaster:
         """ Forecast [n,72] (normalized).
         """
         if not self.autoregressive:
-            return np.column_stack([b.predict(xgb.DMatrix(self.features(lookback, x_dec[:, h])))
+            return np.column_stack([b.predict(self.matrix(lookback, x_dec[:, h]))
                                     for h, b in enumerate(self.boosters)])
         history, preds = lookback.copy(), []
         for h in range(HORIZON_H):
-            pred = self.boosters[0].predict(xgb.DMatrix(self.features(history, x_dec[:, h])))
+            pred = self.boosters[0].predict(self.matrix(history, x_dec[:, h]))
             preds.append(pred)
             history = np.column_stack([history[:, 1:], pred])  # prediction becomes the newest lag
         return np.column_stack(preds)
 
-    def save(self, directory):
-        """ Save every model to a folder.
+    def importance(self) -> pd.DataFrame:
+        """ Return the gain of every feature in each model: one row per forecast hour (a single
+            row for the autoregressive model), zero where a model never split on a feature.
         """
-        Path(directory).mkdir(parents=True, exist_ok=True)
-        for h, b in enumerate(self.boosters):
-            b.save_model(str(Path(directory) / f"hour_{h:02d}.ubj"))
+        gains = pd.DataFrame([b.get_score(importance_type="gain") for b in self.boosters],
+                             columns=GBT_FEATURES).fillna(0.0)
+        return gains.rename_axis("lead").reset_index().assign(lead=lambda f: f["lead"] + 1)
 
     def load(self, directory):
-        """ Load the models saved by save().
+        """ Load the models fit() saved to a folder.
         """
         paths = sorted(Path(directory).glob("hour_*.ubj"))
         self.boosters = [xgb.Booster(model_file=str(p)) for p in paths]

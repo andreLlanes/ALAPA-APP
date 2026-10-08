@@ -47,8 +47,9 @@ def find_windows(station_of_row, hours, pm, feat) -> np.ndarray:
     return first[valid]
 
 def longest_lookback_gaps(pm, start) -> np.ndarray:
-    """ Measure the longest run of missing PM2.5 hours in each window's lookback (0 if none).
-        Raise if a lookback is entirely missing.
+    """ Measure the longest run of missing PM2.5 hours in each window's lookback (0 if none,
+        72 if the whole lookback is missing). The longest-gap filter (at most 12) removes any window
+        with a longer run, so a window without an observed lookback hour is never used.
     """
     gap = np.zeros(len(start), np.int16)
     # Only windows that have a gap are examined.
@@ -56,8 +57,6 @@ def longest_lookback_gaps(pm, start) -> np.ndarray:
     with_gaps = np.flatnonzero(missing_before[start + LOOKBACK_H] > missing_before[start])
     incomplete = pm[start[with_gaps, None] + np.arange(LOOKBACK_H)]
     prev, nxt = nan_bounds(incomplete)
-    if np.any((prev < 0) & (nxt == LOOKBACK_H)):
-        raise ValueError("a window has an all-missing lookback")
     # A missing hour's gap length is the distance between its bounds, minus the bounds themselves.
     gap[with_gaps] = np.where(np.isnan(incomplete), nxt - prev - 1, 0).max(1)
     return gap

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 import config
 from utils import runlog
-from utils.progress import load_checkpoint, save_checkpoint
+from utils.checkpoint import load_checkpoint, save_checkpoint
 
 def seed_everything(seed: int):
     """ Seed Python, NumPy and torch (weights, dropout); optionally force deterministic GPU kernels.
@@ -81,7 +81,9 @@ def _target_reps(model, target_batches, rng, device):
 def fit(model, train_batches, val_batches, lr, seed, device="cpu", align=None, ckpt=None,
         verbose=True, decay=True, label="TRAINING"):
     """ Train with early stopping and restore the best epoch; return the history.
-        train_batches(rng) / val_batches() yield NumPy batches. align = (MMDAlignment,
+        train_batches(rng) yields NumPy batches; val_batches is a list of factories, one per
+        validation city, and the validation score is the mean of their RMSEs (so a larger city
+        does not dominate early stopping). align = (MMDAlignment,
         target_batches) adds lambda * MMD between source and target encoder representations.
         ckpt is a checkpoint path: rerunning resumes, and a finished run returns immediately.
         Aligned runs are not checkpointed: their target-batch order cannot be resumed exactly.
@@ -144,7 +146,8 @@ def fit(model, train_batches, val_batches, lr, seed, device="cpu", align=None, c
             n += b["y"].numel()
 
         train = math.sqrt(sq.item() / max(n, 1))
-        val = evaluate(model, val_batches, device)
+        by_city = [evaluate(model, batches, device) for batches in val_batches]
+        val = sum(by_city) / len(by_city)
         # Early stopping and LR decay only start once teacher forcing has reached 0.
         if tf == 0:
             if val < state["best"]:
@@ -153,7 +156,8 @@ def fit(model, train_batches, val_batches, lr, seed, device="cpu", align=None, c
                 state["bad"] += 1
             if sched:
                 sched.step(val)
-        state["history"].append({"epoch": epoch + 1, "train": train, "val": val, "tf": tf,
+        state["history"].append({"epoch": epoch + 1, "train": train, "val": val,
+                                 "val_by_city": [round(v, 4) for v in by_city], "tf": tf,
                                  "lr": opt.param_groups[0]["lr"],
                                  "mmd2": mmd_sum / mmd_n if mmd_n else float("nan")})
         line = f"    EPOCH {epoch + 1}/{config.MAX_EPOCHS}: train = {train:.4f}, val = {val:.4f}"

@@ -4,7 +4,7 @@
     station is scored on its windows in the test partition of the run's split.
 
     Selection, in order:
-        1. Eligibility: completeness >= 70% (rule 1a) and >= MIN_GRADED_WINDOWS test windows
+        1. Eligibility: completeness >= 70% (rule 1a) and >= MIN_TEST_WINDOWS test windows
            under the default filters (rule 1b). No training history is required.
         2. Density: distance to the k-th nearest eligible neighbour.
         3. Bands: eligible stations grouped into density bands by quantile.
@@ -13,7 +13,7 @@
     Two lists are saved: the training pool (rule 1a; every fold trains on it minus the withheld
     station) and the eligible stations (1a and 1b), from which the folds are drawn.
     The file is not overwritten without --overwrite: changing the folds invalidates every result.
-    PYTHONPATH=.. python -m tuning.loso_fold
+    python -m tuning.loso_fold
 """
 
 from __future__ import annotations
@@ -24,52 +24,49 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
+import sys
+from pathlib import Path
+
+# Put the O2 root on the import path, so this file runs as a script or as a module.
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 import config
 from Common.splits import TEST
 from data.batch import station_distances_km
 from data.database import CITIES, read_copy
 from data.load import LOSO_PATH, load_city
 from data.windows import city_arrays
-from utils.artifacts import load_json, save_json
+from utils.artifacts import save_json
 
-CITY = "mm"
-N_FOLDS = 20
-COMPLETENESS_MIN = 0.70    # completeness over the active range (rule 1a)
-MIN_GRADED_WINDOWS = 100   # test windows under the default filters (rule 1b)
-K_NEIGHBOR = 3
-N_BANDS = 4
-BAND_NAMES = {3: ("core", "middle", "periphery"),
-              4: ("core", "inner", "outer", "periphery")}
-SEED = 2026
-
-def station_stats(city: str = CITY) -> pd.DataFrame:
+def station_stats(city: str = config.LOSO_CITY) -> pd.DataFrame:
     """ Return one row per station: coordinates, completeness, and test windows under the defaults.
     """
     arrays = city_arrays(read_copy(city))
     stats = pd.DataFrame({"location_key": arrays["keys"], "latitude": arrays["lat"],
                           "longitude": arrays["lon"], "completeness": arrays["completeness"]})
-    data = load_city(city, config.DEFAULT_LONGEST_GAP, int(COMPLETENESS_MIN * 100))
+    data = load_city(city, config.DEFAULT_LONGEST_GAP, config.DEFAULT_COMPLETENESS)
     counts = pd.Series(data.keys[data.station[data.split_window_ids(TEST)]]).value_counts()
     stats["graded_windows"] = stats["location_key"].map(counts).fillna(0).astype(int)
     return stats
 
-def training_pool(stats: pd.DataFrame, threshold: float = COMPLETENESS_MIN) -> pd.DataFrame:
+def training_pool(stats: pd.DataFrame,
+                  threshold: float = config.LOSO_COMPLETENESS) -> pd.DataFrame:
     """ Return stations with coordinates that meet the quality rule (rule 1a).
     """
     has_coords = stats["latitude"].notna() & stats["longitude"].notna()
     keep = has_coords & (stats["completeness"] >= threshold)
     return stats[keep].sort_values("location_key").reset_index(drop=True)
 
-def eligible_stations(stats: pd.DataFrame, threshold: float = COMPLETENESS_MIN,
-                      min_windows: int = MIN_GRADED_WINDOWS) -> pd.DataFrame:
+def eligible_stations(stats: pd.DataFrame, threshold: float = config.LOSO_COMPLETENESS,
+                      min_windows: int = config.MIN_TEST_WINDOWS) -> pd.DataFrame:
     """ Return training-pool stations that can also be scored (rules 1a and 1b).
     """
     pool = training_pool(stats, threshold)
     keep = pool["graded_windows"].fillna(0) >= min_windows
     return pool[keep].reset_index(drop=True)
 
-def add_density_bands(eligible: pd.DataFrame, k: int = K_NEIGHBOR,
-                      n_bands: int = N_BANDS) -> pd.DataFrame:
+def add_density_bands(eligible: pd.DataFrame, k: int = config.LOSO_K_NEIGHBOR,
+                      n_bands: int = config.LOSO_BANDS) -> pd.DataFrame:
     """ Attach each station's k-th-nearest-neighbour distance and its density band (0 = densest).
         Quantile edges split the eligible stations into bands of near-equal size.
     """
@@ -84,7 +81,7 @@ def add_density_bands(eligible: pd.DataFrame, k: int = K_NEIGHBOR,
     # Rank first so tied distances cannot collapse two quantile edges into one.
     out["band"] = pd.qcut(out["knn_distance_km"].rank(method="first"),
                           n_bands, labels=False).astype(int)
-    names = BAND_NAMES.get(n_bands, tuple(f"band_{b}" for b in range(n_bands)))
+    names = config.LOSO_BAND_NAMES.get(n_bands, tuple(f"band_{b}" for b in range(n_bands)))
     out["density_band"] = out["band"].map(dict(enumerate(names)))
     return out
 
@@ -112,7 +109,8 @@ def allocate(band_sizes: list[int], n_folds: int) -> list[int]:
             short -= give
     return take
 
-def select_folds(banded: pd.DataFrame, n_folds: int = N_FOLDS, seed: int = SEED) -> pd.DataFrame:
+def select_folds(banded: pd.DataFrame, n_folds: int = config.LOSO_FOLDS,
+                 seed: int = config.LOSO_SEED) -> pd.DataFrame:
     """ Draw the held-out stations from each band under a fixed seed (sorted by key first, so the
         result depends only on the seed and the station set).
     """
@@ -165,29 +163,15 @@ def build_record(stats, pool, banded, folds, settings: dict) -> dict:
         "folds": rows(folds, ["fold_id"] + station_cols),
     }
 
-def load_folds(path=LOSO_PATH) -> dict:
-    """ Read the frozen fold record. Downstream code uses this and never re-selects.
-    """
-    return load_json(path)
-
-def iter_loso_folds(record: dict):
-    """ Yield (fold_id, held_out_key, train_keys) for each frozen fold; each fold trains on the
-        whole training pool except the withheld station.
-    """
-    pool = [s["location_key"] for s in record.get("training_pool", record["eligible_stations"])]
-    for fold in record["folds"]:
-        held = fold["location_key"]
-        yield fold["fold_id"], held, [k for k in pool if k != held]
-
 def main():
     p = argparse.ArgumentParser(description="Select and freeze the LOSO folds (Section 4.7.3).")
-    p.add_argument("--city", default=CITY, choices=list(CITIES))
-    p.add_argument("--n-folds", type=int, default=N_FOLDS)
-    p.add_argument("--k", type=int, default=K_NEIGHBOR)
-    p.add_argument("--n-bands", type=int, default=N_BANDS)
-    p.add_argument("--completeness", type=float, default=COMPLETENESS_MIN)
-    p.add_argument("--min-windows", type=int, default=MIN_GRADED_WINDOWS)
-    p.add_argument("--seed", type=int, default=SEED)
+    p.add_argument("--city", default=config.LOSO_CITY, choices=list(CITIES))
+    p.add_argument("--n-folds", type=int, default=config.LOSO_FOLDS)
+    p.add_argument("--k", type=int, default=config.LOSO_K_NEIGHBOR)
+    p.add_argument("--n-bands", type=int, default=config.LOSO_BANDS)
+    p.add_argument("--completeness", type=float, default=config.LOSO_COMPLETENESS)
+    p.add_argument("--min-windows", type=int, default=config.MIN_TEST_WINDOWS)
+    p.add_argument("--seed", type=int, default=config.LOSO_SEED)
     p.add_argument("--overwrite", action="store_true", help="replace the frozen fold file")
     args = p.parse_args()
     if LOSO_PATH.exists() and not args.overwrite:
