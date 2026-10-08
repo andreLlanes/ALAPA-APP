@@ -6,19 +6,30 @@ Forecasts 72 hours of PM2.5 from a 72-hour lookback, for Metro Manila (`mm`), Ba
 
 Put `.env` at the repo root with `PG_DSN` (or `PG_HOST`, `PG_PORT`, `PG_DB`, `PG_USER`, `PG_PASSWORD`).
 
-Run everything from inside `O2/`, with `PYTHONPATH=..` so `Common/` is importable.
+Install the packages once (from inside `O2/`):
+
+```
+pip install -r requirements.txt
+```
+
+Run everything from inside `O2/`, after setting `PYTHONPATH` once per terminal so `Common/` is importable:
+
+```
+export PYTHONPATH=..          # macOS / Linux
+$env:PYTHONPATH = ".."        # Windows PowerShell
+```
 
 ## Run
 
 ```
-PYTHONPATH=.. python -m data.database                        # copy the database (once)
-PYTHONPATH=.. python train.py --model lstm --city mm         # tune, train, score, compare
-PYTHONPATH=.. python train.py --model gnn --city mm --transfer true --source bk
-PYTHONPATH=.. python -m evals.eval                           # compare everything trained
-PYTHONPATH=.. python -m tuning.loso_fold                     # select the 20 LOSO stations (once)
+python -m data.database                        # copy the database (once)
+python train.py --model lstm --city mm         # tune, train, score, compare
+python train.py --model gnn --city mm --transfer true --source bk
+python -m evals.eval                           # compare everything trained
+python -m tuning.loso_fold                     # select the 20 LOSO stations (once)
 ```
 
-After the database changes: `PYTHONPATH=.. python -m data.database --refresh`, then delete `artifacts/`.
+After the database changes: `python -m data.database --refresh`, then delete `artifacts/`.
 
 ## Arguments (`train.py`)
 
