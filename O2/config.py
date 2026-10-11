@@ -25,7 +25,7 @@ DEFAULT_BLOCK = "all"
 
 # Training loop
 MAX_EPOCHS = 100
-PATIENCE = 10            # epochs without val improvement, counted once teacher forcing is 0
+PATIENCE = 20            # epochs without val improvement, counted once teacher forcing is 0
 TF_DECAY_RATE = 0.05     # teacher forcing drops by this much per epoch (1.0 -> 0.0)
 DROPOUT = 0.0
 LR_DECAY_FACTOR = 0.5    # learning rate multiplier when val stalls (1.0 = off)
