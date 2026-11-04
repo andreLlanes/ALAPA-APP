@@ -1,23 +1,22 @@
-"""
-Rasterize OSM building footprints to building-coverage fraction on the study's
-common 100 m grid (Section: Building Footprint Rasterization).
+""" Rasterize OSM building footprints to building-coverage fraction on the study's
+    common 100 m grid (Section: Building Footprint Rasterization).
 
-Output: a single-band GeoTIFF where each cell holds the fraction of its area
-covered by building footprints, in [0, 1]. Cells with no buildings are 0.
-All tagged footprints are included regardless of building type.
+    Output: a single-band GeoTIFF where each cell holds the fraction of its area
+    covered by building footprints, in [0, 1]. Cells with no buildings are 0.
+    All tagged footprints are included regardless of building type.
 
-Common grid (UTM Zone 51N, EPSG:32651):
-    upper-left origin : easting 276700 m, northing 1635100 m
-    cell size         : 100 m
-    dimensions        : 242 cols x 490 rows  (24.2 km x 49.0 km, 118580 cells)
+    Common grid (UTM Zone 51N, EPSG:32651):
+        upper-left origin : easting 276700 m, northing 1635100 m
+        cell size         : 100 m
+        dimensions        : 242 cols x 490 rows  (24.2 km x 49.0 km, 118580 cells)
 
-Method — supersampled coverage:
-    Each 100 m cell is divided into an N x N subgrid (default 10 x 10 -> 10 m
-    subcells) and the footprints are burned as a boolean mask at that fine
-    resolution. The mask is then block-averaged back to 100 m: the mean of each
-    N x N block is the fraction of that cell covered. Footprints are streamed from
-    disk in chunks and burned onto the fine mask one chunk at a time, so the full
-    layer never sits in RAM at once.
+    Method — supersampled coverage:
+        Each 100 m cell is divided into an N x N subgrid (default 10 x 10 -> 10 m
+        subcells) and the footprints are burned as a boolean mask at that fine
+        resolution. The mask is then block-averaged back to 100 m: the mean of each
+        N x N block is the fraction of that cell covered. Footprints are streamed from
+        disk in chunks and burned onto the fine mask one chunk at a time, so the full
+        layer never sits in RAM at once.
 """
 
 import os
@@ -48,7 +47,8 @@ FINE_TRANSFORM = Affine(CELL / SUBSAMPLE, 0, ORIGIN_E,
 
 
 def _burn_chunk(gdf, fine):
-    """Reproject one chunk to the grid CRS and OR its footprints into `fine`."""
+    """ Reproject one chunk to the grid CRS and OR its footprints into `fine`.
+    """
     if gdf.crs is None:
         raise ValueError("input chunk has no CRS")
     gdf = gdf.to_crs(CRS)
@@ -71,12 +71,12 @@ def _burn_chunk(gdf, fine):
 
 
 def coverage_fraction_from_file(path, chunk_size=CHUNK_SIZE):
-    """Stream footprints from `path` and return the (NROWS, NCOLS) fraction grid.
+    """ Stream footprints from `path` and return the (NROWS, NCOLS) fraction grid.
 
-    The file is read `chunk_size` features at a time; each chunk is reprojected
-    and burned onto a single persistent fine mask, so the full layer is never
-    materialized in memory at once. Falls back to a whole-file read only if the
-    installed geopandas/pyogrio can't slice rows.
+        The file is read `chunk_size` features at a time; each chunk is reprojected
+        and burned onto a single persistent fine mask, so the full layer is never
+        materialized in memory at once. Falls back to a whole-file read only if the
+        installed geopandas/pyogrio can't slice rows.
     """
     fine_h = NROWS * SUBSAMPLE
     fine_w = NCOLS * SUBSAMPLE
@@ -105,14 +105,16 @@ def coverage_fraction_from_file(path, chunk_size=CHUNK_SIZE):
 
 
 def _blocks_to_fraction(fine):
-    """Block-average the SUBSAMPLE x SUBSAMPLE mask down to coverage in [0,1]."""
+    """ Block-average the SUBSAMPLE x SUBSAMPLE mask down to coverage in [0,1].
+    """
     return (fine.reshape(NROWS, SUBSAMPLE, NCOLS, SUBSAMPLE)
                 .mean(axis=(1, 3))
                 .astype("float32"))
 
 
 def coverage_fraction(gdf):
-    """Coverage fraction for an already-loaded GeoDataFrame."""
+    """ Coverage fraction for an already-loaded GeoDataFrame.
+    """
     fine_h = NROWS * SUBSAMPLE
     fine_w = NCOLS * SUBSAMPLE
     fine = np.zeros((fine_h, fine_w), dtype="uint8")
@@ -123,6 +125,9 @@ def coverage_fraction(gdf):
 
 
 def write_raster(frac, path):
+    """ Write the per-cell building-coverage fraction as a single-band float32 GeoTIFF
+        on the common grid.
+    """
     with rasterio.open(
         path, "w",
         driver="GTiff",
@@ -136,6 +141,9 @@ def write_raster(frac, path):
 
 
 def main():
+    """ Stream building footprints, compute per-cell coverage fraction on the common grid,
+        and write the raster.
+    """
     print(f"Streaming footprints from {INPUT_GEOJSON} "
           f"(chunk={CHUNK_SIZE:,}, subsample={SUBSAMPLE})")
     frac = coverage_fraction_from_file(INPUT_GEOJSON)

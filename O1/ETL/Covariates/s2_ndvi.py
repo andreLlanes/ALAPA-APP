@@ -1,21 +1,20 @@
-"""
-Sentinel-2 quarterly NDVI composites for Metro Manila on the study's common grid
-(Section: NDVI Compositing). Backfill version: computes all 12 offset quarters
-from 2023-08-30 to 2026-08-30 in one run. The automated scheduler is a separate
-script; this one is the one-off historical ETL.
+""" Sentinel-2 quarterly NDVI composites for Metro Manila on the study's common grid
+    (Section: NDVI Compositing). Backfill version: computes all 12 offset quarters
+    from 2023-08-30 to 2026-08-30 in one run. The automated scheduler is a separate
+    script; this one is the one-off historical ETL.
 
-Method:
-  - NDVI = (B08 - B04) / (B08 + B04).
-  - Scenes with >5% cloud cover excluded at request time (maxCloudCoverage).
-  - Per-pixel SCL masking of cloud shadow (3), cloud medium/high (8, 9), thin
-    cirrus (10) and snow/ice (11); invalid pixels dropped via dataMask.
-  - Quarterly per-pixel MEDIAN of all valid acquisitions in each 3-month period.
-  - Requested in UTM Zone 51N (EPSG:32651) on the common 100 m grid
-    (origin 276700/1635100, 242 x 490), downsampled from the 10 m native B04/B08.
+    Method:
+      - NDVI = (B08 - B04) / (B08 + B04).
+      - Scenes with >5% cloud cover excluded at request time (maxCloudCoverage).
+      - Per-pixel SCL masking of cloud shadow (3), cloud medium/high (8, 9), thin
+        cirrus (10) and snow/ice (11); invalid pixels dropped via dataMask.
+      - Quarterly per-pixel MEDIAN of all valid acquisitions in each 3-month period.
+      - Requested in UTM Zone 51N (EPSG:32651) on the common 100 m grid
+        (origin 276700/1635100, 242 x 490), downsampled from the 10 m native B04/B08.
 
-Output: one 2-band GeoTIFF per quarter (band 1 = median NDVI, band 2 = valid
-flag: 1 where at least one clear acquisition existed, 0 otherwise), 12 files in
-all, each aligned cell-for-cell with the other covariate layers.
+    Output: one 2-band GeoTIFF per quarter (band 1 = median NDVI, band 2 = valid
+    flag: 1 where at least one clear acquisition existed, 0 otherwise), 12 files in
+    all, each aligned cell-for-cell with the other covariate layers.
 """
 
 import os
@@ -88,7 +87,8 @@ EVALSCRIPT = """
 
 
 def quarter_windows():
-    """The 12 offset quarters as (label, start, end_exclusive) date tuples."""
+    """ The 12 offset quarters as (label, start, end_exclusive) date tuples.
+    """
     out = []
     for i in range(N_QUARTERS):
         q0 = BACKFILL_START + relativedelta(months=3 * i)
@@ -98,6 +98,9 @@ def quarter_windows():
 
 
 def build_request(start, end):
+    """ Build a Sentinel Hub request for the median-NDVI composite over a date window,
+        on the common grid with the configured cloud filter.
+    """
     return SentinelHubRequest(
         evalscript=EVALSCRIPT,
         input_data=[
@@ -117,7 +120,8 @@ def build_request(start, end):
 
 
 def write_quarter(arr, label):
-    """arr shape (NROWS, NCOLS, 2): band0 NDVI, band1 valid flag."""
+    """ arr shape (NROWS, NCOLS, 2): band0 NDVI, band1 valid flag.
+    """
     path = OUTPUT_DIR / f"S2_NDVI_{label}.tif"
     with rasterio.open(
         path, "w", driver="GTiff",
@@ -132,6 +136,9 @@ def write_quarter(arr, label):
 
 
 def collect_all():
+    """ Fetch every quarter's NDVI composite in turn, logging valid-pixel coverage, and
+        write each to disk.
+    """
     quarters = quarter_windows()
     logger.info(f"Backfilling {len(quarters)} quarters "
                 f"{quarters[0][1]} .. {quarters[-1][2]}")

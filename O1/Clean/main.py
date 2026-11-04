@@ -1,20 +1,21 @@
-"""Build the merged_clean and merged_masked tables, one city at a time.
+""" Build the merged_clean table, one city at a time.
 
-Per station, the pipeline runs:
-    1. grade merge   - attach is_monitor and station lat/lon to raw PM2.5.
-    2. clean         - grade-aware QC (reference monitors skip the flatline rule).
-    3. met merge     - match the nearest IFS grid cell and attach its meteorology
-                       to the cleaned timeline, so gap-filled hours still get met.
-    4. build features - add the six cyclical time encodings.
+    Per station, the pipeline runs:
+        1. grade merge   - attach is_monitor and station lat/lon to raw PM2.5.
+        2. clean         - grade-aware QC (reference monitors skip the flatline rule).
+        3. met merge     - match the nearest IFS grid cell and attach its meteorology
+                           to the cleaned timeline.
+        4. build features - add the six cyclical time encodings (in local time).
 
-Two tables are written from the same cleaned frame: merged_masked keeps every
-row (long-gap NaNs included, for masking), merged_clean drops rows whose pm25 is
-still NaN.
+    merged_clean holds every hour on the station's grid, including missing ones:
+    gaps are left as NaN and carry a gap_length (the NaN-run length; NULL where
+    present). No interpolation is done here -- filling is deferred to training so it
+    can be fit per split without leakage.
 
-Reads only the raw tables (gs_measurements, gs_stations, ifs_met). Progress is
-tracked per (city, station) in a text ledger, and the connection auto-reconnects,
-so an interrupted run resumes. Only the Postgres connection comes from the
-environment (PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
+    Reads only the raw tables (gs_measurements, gs_stations, ifs_met). Progress is
+    tracked per (city, station) in a text ledger, and the connection auto-reconnects,
+    so an interrupted run resumes. Only the Postgres connection comes from the
+    environment (PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
 """
 
 import os
@@ -30,36 +31,26 @@ from dotenv import load_dotenv
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
-_COMMON_DIR = os.path.abspath(os.path.join(_HERE, "..", "common"))
 
 load_dotenv(os.path.join(_REPO_ROOT, ".env"))
-sys.path.insert(0, _COMMON_DIR)
+sys.path.insert(0, _HERE)
 
-from schema import MET_COLS, TIME_COLS, TIME_COL, MERGED_TABLE, MASKED_TABLE
+from Common.schema import MET_COLS, TIME_COLS, TIME_COL
 from clean import clean_one_station
 from build_features import build_features
 
 RAW_MEASUREMENTS_TABLE = "openaq.gs_measurements"
 RAW_MET_TABLE = "openaq.ifs_met"
 STATIONS_TABLE = "openaq.gs_stations"
+MERGED_TABLE = "openaq.merged_clean"
 UPSERT_CHUNK_SIZE = 5000
-# Ledger and provenance are named after the table version, so a ledger left by a
-# build of another version can never make this one skip stations.
-_VERSION_TAG = MERGED_TABLE.split(".")[-1]
-LEDGER_PATH = os.path.join(_HERE, f"{_VERSION_TAG}_progress.txt")
-PROVENANCE_PATH = os.path.join(_HERE, f"provenance_{_VERSION_TAG}.csv")
-
-# Every column store_rows writes; checked against the live tables before a run.
-STORED_COLS = (["location_key", "timestamp_utc", "city", "pm25",
-                "short_gap_filled", "long_gap_missing", "is_monitor",
-                "latitude", "longitude", "grid_latitude", "grid_longitude"]
-               + MET_COLS + TIME_COLS)
+LEDGER_PATH = "merged_progress.txt"
+PROVENANCE_PATH = "provenance_log.csv"
 PROVENANCE_FIELDS = [
-    "city", "location_key", "raw_rows", "nonpositive_dropped", "duplicate_rows",
-    "active_range_hours", "gap_hours_inserted", "is_reference",
-    "flatline_hours_removed", "short_gap_filled_count", "long_gap_missing_count",
-    "final_rows", "final_valid", "grid_latitude", "grid_longitude",
-    "stored_rows", "stored_rows_masked",
+    "city", "location_key", "raw_rows", "nonpositive_dropped", "over_max_dropped",
+    "duplicate_rows", "active_range_hours", "gap_hours_inserted", "is_reference",
+    "flatline_hours_removed", "gap_interior_dropped", "short_gap_count", "long_gap_count",
+    "final_rows", "final_valid", "grid_latitude", "grid_longitude", "stored_rows",
 ]
 
 CITIES = ["Los Angeles", "Bangkok", "Metro Manila"]
@@ -67,7 +58,8 @@ CITY_COUNTRY = {"Los Angeles": "US", "Bangkok": "TH", "Metro Manila": "PH"}
 
 
 def load_ledger():
-    """Return the set of (city, location_key) pairs already processed."""
+    """ Return the set of (city, location_key) pairs already processed.
+    """
     done = set()
     if not os.path.exists(LEDGER_PATH):
         return done
@@ -79,13 +71,15 @@ def load_ledger():
 
 
 def append_ledger(city, location_key):
-    """Record one completed station in the ledger."""
+    """ Record one completed station in the ledger.
+    """
     with open(LEDGER_PATH, "a", newline="") as f:
         csv.writer(f).writerow([city, location_key])
 
 
 def resolve_pg_dsn():
-    """Build the Postgres DSN from PG_DSN, or from the PG_* component vars."""
+    """ Build the Postgres DSN from PG_DSN, or from the PG_* component vars.
+    """
     dsn = os.environ.get("PG_DSN")
     if dsn:
         return dsn
@@ -104,7 +98,8 @@ _CONN = None
 
 
 def get_conn():
-    """Return a live connection, reconnecting if the previous one has dropped."""
+    """ Return a live connection, reconnecting if the previous one has dropped.
+    """
     global _CONN, _PG_DSN
     if _PG_DSN is None:
         _PG_DSN = resolve_pg_dsn()
@@ -120,16 +115,13 @@ def get_conn():
                 pass
             _CONN = None
     if _CONN is None or _CONN.closed != 0:
-        # Keepalives make a silently dropped network fail within about a minute
-        # instead of hanging forever, so the run stops cleanly and can resume.
-        _CONN = psycopg2.connect(_PG_DSN, connect_timeout=30, keepalives=1,
-                                 keepalives_idle=30, keepalives_interval=10,
-                                 keepalives_count=3)
+        _CONN = psycopg2.connect(_PG_DSN)
     return _CONN
 
 
 def _safe_rollback(conn):
-    """Roll back without raising if the connection is already broken."""
+    """ Roll back without raising if the connection is already broken.
+    """
     try:
         conn.rollback()
     except psycopg2.Error:
@@ -137,63 +129,39 @@ def _safe_rollback(conn):
 
 
 def create_table_if_needed():
-    """Create merged_clean and merged_masked if they do not already exist."""
+    """ Create the merged_clean table if it does not already exist.
+    """
     conn = get_conn()
     met_ddl = ",\n            ".join(f"{c} double precision" for c in MET_COLS)
     time_ddl = ",\n            ".join(f"{c} double precision" for c in TIME_COLS)
-    for table in (MERGED_TABLE, MASKED_TABLE):
-        ddl = f"""
-            CREATE TABLE IF NOT EXISTS {table} (
-                location_key text NOT NULL,
-                timestamp_utc timestamptz NOT NULL,
-                city text,
-                pm25 double precision,
-                short_gap_filled boolean,
-                long_gap_missing boolean,
-                is_monitor boolean,
-                latitude double precision,
-                longitude double precision,
-                grid_latitude double precision,
-                grid_longitude double precision,
-                {met_ddl},
-                {time_ddl},
-                inserted_at timestamptz NOT NULL DEFAULT now(),
-                PRIMARY KEY (location_key, timestamp_utc)
-            )
-        """
-        with conn.cursor() as cur:
-            cur.execute(ddl)
-    conn.commit()
-    print(f"Ensured {MERGED_TABLE} and {MASKED_TABLE} exist.")
-
-
-def check_table_columns():
-    """Stop before any work if a target table lacks a column this build writes.
-
-    CREATE TABLE IF NOT EXISTS leaves an existing table untouched, so a table
-    built under an older schema would otherwise fail on every insert.
+    ddl = f"""
+        CREATE TABLE IF NOT EXISTS {MERGED_TABLE} (
+            location_key text NOT NULL,
+            timestamp_utc timestamptz NOT NULL,
+            city text,
+            pm25 double precision,
+            gap_length integer,
+            is_monitor boolean,
+            latitude double precision,
+            longitude double precision,
+            grid_latitude double precision,
+            grid_longitude double precision,
+            {met_ddl},
+            {time_ddl},
+            inserted_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (location_key, timestamp_utc)
+        )
     """
-    conn = get_conn()
-    for table in (MERGED_TABLE, MASKED_TABLE):
-        schema, name = table.split(".")
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = %s AND table_name = %s",
-                (schema, name))
-            present = {r[0] for r in cur.fetchall()}
-        missing = [c for c in STORED_COLS if c not in present]
-        if missing:
-            raise RuntimeError(
-                f"{table} exists but lacks {missing}; it was built under another "
-                f"schema. Bump MERGED_TABLE/MASKED_TABLE in common/schema.py "
-                f"rather than writing into it.")
+    with conn.cursor() as cur:
+        cur.execute(ddl)
+    conn.commit()
+    print(f"Ensured {MERGED_TABLE} exists.")
 
 
 def _read_sql(query, params=None):
-    """Run a query on the managed connection and return a DataFrame.
+    """ Run a query on the managed connection and return a DataFrame.
 
-    Reads via the raw cursor to avoid pandas' SQLAlchemy-connection warning.
+        Reads via the raw cursor to avoid pandas' SQLAlchemy-connection warning.
     """
     conn = get_conn()
     with conn.cursor() as cur:
@@ -204,7 +172,8 @@ def _read_sql(query, params=None):
 
 
 def fetch_station_keys(city):
-    """Return the distinct station keys for a city, for per-station streaming."""
+    """ Return the distinct station keys for a city, for per-station streaming.
+    """
     query = f"""
         SELECT DISTINCT location_key
         FROM {RAW_MEASUREMENTS_TABLE}
@@ -215,7 +184,8 @@ def fetch_station_keys(city):
 
 
 def fetch_pm25_station(location_key):
-    """Return one station's raw PM2.5 rows, ordered by time."""
+    """ Return one station's raw PM2.5 rows, ordered by time.
+    """
     query = f"""
         SELECT location_key, timestamp_utc, pm25, city
         FROM {RAW_MEASUREMENTS_TABLE}
@@ -226,7 +196,8 @@ def fetch_pm25_station(location_key):
 
 
 def fetch_stations(city):
-    """Return station metadata (coords, is_monitor) for a city's country."""
+    """ Return station metadata (coords, is_monitor) for a city's country.
+    """
     query = f"""
         SELECT location_key, latitude, longitude, is_monitor
         FROM {STATIONS_TABLE}
@@ -236,7 +207,8 @@ def fetch_stations(city):
 
 
 def fetch_grid_cells(city):
-    """Return the distinct IFS grid-cell coordinates for a city."""
+    """ Return the distinct IFS grid-cell coordinates for a city.
+    """
     query = f"""
         SELECT DISTINCT latitude, longitude
         FROM {RAW_MET_TABLE}
@@ -246,7 +218,8 @@ def fetch_grid_cells(city):
 
 
 def fetch_met_cell(city, grid_lat, grid_lon):
-    """Return the meteorology time series for a single grid cell."""
+    """ Return the meteorology time series for a single grid cell.
+    """
     query = f"""
         SELECT latitude, longitude, timestamp_utc,
                temperature_c, humidity_pct, wind_speed_ms, wind_gusts_ms,
@@ -259,7 +232,8 @@ def fetch_met_cell(city, grid_lat, grid_lon):
 
 
 def _transform_met_wind(met):
-    """Convert wind speed/direction to orthogonal u/v components."""
+    """ Convert wind speed/direction to orthogonal u/v components.
+    """
     met = met.copy()
     theta = np.deg2rad(met["wind_dir_deg"])
     s = met["wind_speed_ms"]
@@ -269,23 +243,33 @@ def _transform_met_wind(met):
 
 
 def _na_to_none(v):
-    """Map pandas NA/NaN to None so psycopg2 writes SQL NULL."""
+    """ Coerce a value for psycopg2: pandas NA/NaN -> None, numpy scalars -> Python.
+
+        itertuples yields numpy scalars (int64, float64, bool_) which psycopg2 cannot
+        adapt directly; .item() converts them to native int/float/bool.
+    """
     try:
         if v is None or pd.isna(v):
             return None
     except (TypeError, ValueError):
         pass
+    if isinstance(v, np.generic):
+        return v.item()
     return v
 
 
 def store_rows(table, df):
-    """Upsert a station's rows into the given table, chunked."""
+    """ Upsert a station's rows into the given table, chunked.
+    """
     conn = get_conn()
     if df.empty:
         conn.commit()
         print(f"  committed 0 rows to {table}")
         return
-    cols = STORED_COLS
+    cols = (["location_key", "timestamp_utc", "city", "pm25",
+             "gap_length", "is_monitor",
+             "latitude", "longitude", "grid_latitude", "grid_longitude"]
+            + MET_COLS + TIME_COLS)
     values = [tuple(_na_to_none(getattr(r, c, None)) for c in cols)
               for r in df.itertuples(index=False)]
     col_sql = ", ".join(cols)
@@ -310,7 +294,8 @@ def store_rows(table, df):
 
 
 def _match_one_station(lat, lon, cells):
-    """Return the (lat, lon) of the grid cell nearest a station (haversine)."""
+    """ Return the (lat, lon) of the grid cell nearest a station (haversine).
+    """
     cell_lat = np.radians(cells["latitude"].to_numpy())
     cell_lon = np.radians(cells["longitude"].to_numpy())
     lat_r, lon_r = np.radians(lat), np.radians(lon)
@@ -322,11 +307,11 @@ def _match_one_station(lat, lon, cells):
     return float(cells["latitude"].iloc[j]), float(cells["longitude"].iloc[j])
 
 
-def process_city(city, done, prov, pf):
-    """Stream a city's stations, clean and merge each, and write both tables.
+def process_city(city, done, prov):
+    """ Stream a city's stations, clean and merge each, and write both tables.
 
-    Skips stations already in ``done``, appends one provenance row per station
-    (flushed through ``pf``), and records each completed station in the ledger.
+        Skips stations already in ``done``, appends one provenance row per station,
+        and records each completed station in the ledger.
     """
     print(f"{city}: streaming stations")
     stations = fetch_stations(city)
@@ -361,7 +346,7 @@ def process_city(city, done, prov, pf):
         cleaned, stats = clean_one_station(raw)
         rec = {"city": city, "location_key": location_key, **stats,
                "grid_latitude": None, "grid_longitude": None,
-               "stored_rows": 0, "stored_rows_masked": 0}
+               "stored_rows": 0}
 
         if not cleaned.empty and not cells.empty and pd.notna(cleaned["latitude"].iloc[0]):
             glat, glon = _match_one_station(
@@ -391,52 +376,34 @@ def process_city(city, done, prov, pf):
 
         if not cleaned.empty:
             cleaned = build_features(cleaned)
-            store_rows(MASKED_TABLE, cleaned)
-            clean_rows = cleaned[cleaned["pm25"].notna()]
-            store_rows(MERGED_TABLE, clean_rows)
-            rec["stored_rows"] = len(clean_rows)
-            rec["stored_rows_masked"] = len(cleaned)
+            store_rows(MERGED_TABLE, cleaned)
+            rec["stored_rows"] = len(cleaned)
 
         prov.writerow(rec)
-        # Flush before the ledger marks the station done, so a killed run can
-        # never leave a finished station without its provenance row.
-        pf.flush()
         append_ledger(city, location_key)
         done.add((city, location_key))
 
     print(f"  {city} done")
 
 
-def main(cities=CITIES):
-    """Process the given cities, writing both tables and the provenance log."""
+def main():
+    """ Process every city, writing both tables and the provenance log.
+    """
     done = load_ledger()
     print(f"Loaded {len(done)} completed (city, station) entries from {LEDGER_PATH}.")
     create_table_if_needed()
-    check_table_columns()
-    # An empty file (e.g. left by a killed run) still needs its header.
-    new_log = not os.path.exists(PROVENANCE_PATH) or os.path.getsize(PROVENANCE_PATH) == 0
-    failed = []
+    new_log = not os.path.exists(PROVENANCE_PATH)
     with open(PROVENANCE_PATH, "a", newline="") as pf:
         prov = csv.DictWriter(pf, fieldnames=PROVENANCE_FIELDS)
         if new_log:
             prov.writeheader()
-        for city in cities:
+        for city in CITIES:
             try:
-                process_city(city, done, prov, pf)
+                process_city(city, done, prov)
             except Exception as exc:
                 print(f"{city}: failed, left for a later run: {exc}")
-                failed.append(city)
-    print(f"Provenance written to {PROVENANCE_PATH}.")
-    if failed:
-        # Rerunning resumes from the ledger, so only the unfinished stations redo.
-        raise SystemExit(f"Incomplete: {', '.join(failed)} failed. Rerun to resume.")
-    print(f"Done: {', '.join(cities)} written to {MERGED_TABLE} and {MASKED_TABLE}.")
+    print(f"Done. Provenance written to {PROVENANCE_PATH}.")
 
 
 if __name__ == "__main__":
-    import argparse
-    p = argparse.ArgumentParser()
-    p.add_argument("--city", default="all", choices=CITIES + ["all"],
-                   help='one city, or "all" (default) for every city in order')
-    args = p.parse_args()
-    main(CITIES if args.city == "all" else [args.city])
+    main()

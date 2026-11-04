@@ -1,20 +1,20 @@
-"""Load ECMWF IFS (9 km) meteorology into Postgres for the three study cities.
+""" Load ECMWF IFS (9 km) meteorology into Postgres for the three study cities.
 
-Source is the Open-Meteo Historical Weather API (/v1/archive, models=ecmwf_ifs):
-the 9 km IFS archive (not ERA5, not ecmwf_ifs025), hourly, 2017 to present. Each
-city bounding box is sampled on a coordinate lattice; Open-Meteo snaps each
-request point to the nearest native cell and returns that cell's true center,
-which is what gets stored (deduplicated, so points resolving to the same cell
-collapse to one).
+    Source is the Open-Meteo Historical Weather API (/v1/archive, models=ecmwf_ifs):
+    the 9 km IFS archive (not ERA5, not ecmwf_ifs025), hourly, 2017 to present. Each
+    city bounding box is sampled on a coordinate lattice; Open-Meteo snaps each
+    request point to the nearest native cell and returns that cell's true center,
+    which is what gets stored (deduplicated, so points resolving to the same cell
+    collapse to one).
 
-Fetching and storing happen per (city, coord-batch, date-chunk) and commit
-immediately; each completed unit is appended to a text ledger, so a stopped run
-resumes by skipping ledger entries. A sliding-window rate limiter enforces the
-per-minute/hour/day call caps. Boundary-layer height is excluded and there is no
-location_key (grid cells are keyed by city/latitude/longitude).
+    Fetching and storing happen per (city, coord-batch, date-chunk) and commit
+    immediately; each completed unit is appended to a text ledger, so a stopped run
+    resumes by skipping ledger entries. A sliding-window rate limiter enforces the
+    per-minute/hour/day call caps. Boundary-layer height is excluded and there is no
+    location_key (grid cells are keyed by city/latitude/longitude).
 
-Tuning and table names are constants below; only the Postgres connection comes
-from the environment (PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
+    Tuning and table names are constants below; only the Postgres connection comes
+    from the environment (PG_DSN or PG_HOST/PG_DB/PG_USER/PG_PASSWORD).
 """
 
 import os
@@ -22,6 +22,7 @@ import csv
 import time
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -87,11 +88,13 @@ EXPECTED_UNITS = {
 
 
 class RateLimited(Exception):
-    """Raised on a 429 whose Retry-After exceeds the wait cap; stops the run."""
+    """ Raised on a 429 whose Retry-After exceeds the wait cap; stops the run.
+    """
 
 
 class RateLimiter:
-    """Sliding-window limiter enforcing per-minute, per-hour, and per-day caps."""
+    """ Sliding-window limiter enforcing per-minute, per-hour, and per-day caps.
+    """
 
     WINDOWS = (
         (60, RATE_LIMIT_PER_MIN, "minute"),
@@ -103,7 +106,8 @@ class RateLimiter:
         self.calls = []
 
     def acquire(self):
-        """Block until a request may be sent without breaching any window."""
+        """ Block until a request may be sent without breaching any window.
+        """
         while True:
             now = time.monotonic()
             horizon = now - self.WINDOWS[-1][0]
@@ -139,7 +143,8 @@ SESSION.mount("http://", _adapter)
 
 
 def generate_grid_centers(bbox):
-    """Return the (lat, lon) lattice sampling a bbox at GRID_STEP_DEG spacing."""
+    """ Return the (lat, lon) lattice sampling a bbox at GRID_STEP_DEG spacing.
+    """
     min_lat, min_lon, max_lat, max_lon = bbox
     pts = []
     lat = min_lat
@@ -153,7 +158,8 @@ def generate_grid_centers(bbox):
 
 
 def _build_params(lats, lons, start_date, end_date):
-    """Build the archive-API query params for one multi-coordinate request."""
+    """ Build the archive-API query params for one multi-coordinate request.
+    """
     return {
         "latitude": ",".join(f"{v:.4f}" for v in lats),
         "longitude": ",".join(f"{v:.4f}" for v in lons),
@@ -169,7 +175,8 @@ def _build_params(lats, lons, start_date, end_date):
 
 
 def _validate_units(hourly_units):
-    """Raise if the response's units differ from EXPECTED_UNITS."""
+    """ Raise if the response's units differ from EXPECTED_UNITS.
+    """
     if not hourly_units:
         raise ValueError("Open-Meteo response missing hourly_units metadata.")
     mism = [f"{v}: expected {exp}, got {hourly_units.get(v)}"
@@ -179,10 +186,10 @@ def _validate_units(hourly_units):
 
 
 def _parse_location(obj):
-    """Turn one location's response object into a renamed DataFrame.
+    """ Turn one location's response object into a renamed DataFrame.
 
-    Stores the grid-cell center coordinates Open-Meteo returns, not the requested
-    point. Returns an empty frame if the object carries no hourly series.
+        Stores the grid-cell center coordinates Open-Meteo returns, not the requested
+        point. Returns an empty frame if the object carries no hourly series.
     """
     hourly = obj.get("hourly")
     if not hourly or "time" not in hourly:
@@ -196,10 +203,10 @@ def _parse_location(obj):
 
 
 def fetch_batch(lats, lons, start_date, end_date):
-    """Fetch one coord-batch/date-chunk and return per-location DataFrames.
+    """ Fetch one coord-batch/date-chunk and return per-location DataFrames.
 
-    Retries transport and 5xx errors with backoff; a short 429 Retry-After is
-    waited out, a long one raises RateLimited; any other 4xx raises immediately.
+        Retries transport and 5xx errors with backoff; a short 429 Retry-After is
+        waited out, a long one raises RateLimited; any other 4xx raises immediately.
     """
     params = _build_params(lats, lons, start_date, end_date)
     attempt = 0
@@ -259,7 +266,8 @@ def fetch_batch(lats, lons, start_date, end_date):
 
 
 def _date_chunks(start_date, end_date):
-    """Yield inclusive (start, end) sub-windows of at most CHUNK_DAYS."""
+    """ Yield inclusive (start, end) sub-windows of at most CHUNK_DAYS.
+    """
     if CHUNK_DAYS <= 0:
         yield start_date, end_date
         return
@@ -270,7 +278,8 @@ def _date_chunks(start_date, end_date):
 
 
 def load_ledger():
-    """Return the set of completed (city, batch_index, chunk_start, chunk_end)."""
+    """ Return the set of completed (city, batch_index, chunk_start, chunk_end).
+    """
     done = set()
     if not os.path.exists(LEDGER_PATH):
         return done
@@ -282,16 +291,17 @@ def load_ledger():
 
 
 def append_ledger(city, batch_index, chunk_start, chunk_end):
-    """Record one completed (city, coord-batch, date-chunk) in the ledger."""
+    """ Record one completed (city, coord-batch, date-chunk) in the ledger.
+    """
     with open(LEDGER_PATH, "a", newline="") as f:
         csv.writer(f).writerow([city, batch_index, chunk_start, chunk_end])
 
 
 def fetch_and_store_city(conn, city, bbox, start_date, end_date, done):
-    """Fetch a city's grid over its period per (coord-batch, date-chunk) and store.
+    """ Fetch a city's grid over its period per (coord-batch, date-chunk) and store.
 
-    Skips ledger-recorded units and deduplicates points that snap to the same
-    grid cell before upserting each chunk.
+        Skips ledger-recorded units and deduplicates points that snap to the same
+        grid cell before upserting each chunk.
     """
     request_pts = generate_grid_centers(bbox)
     print(f"{city}: {len(request_pts)} request points "
@@ -324,7 +334,8 @@ def fetch_and_store_city(conn, city, bbox, start_date, end_date, done):
 
 
 def resolve_pg_dsn():
-    """Build the Postgres DSN from PG_DSN, or from the PG_* component vars."""
+    """ Build the Postgres DSN from PG_DSN, or from the PG_* component vars.
+    """
     dsn = os.environ.get("PG_DSN")
     if dsn:
         return dsn
@@ -339,7 +350,8 @@ def resolve_pg_dsn():
 
 
 def create_table_if_needed(conn):
-    """Create the ifs_met table if it does not already exist."""
+    """ Create the ifs_met table if it does not already exist.
+    """
     ddl = f"""
         CREATE TABLE IF NOT EXISTS {TABLE} (
             city text NOT NULL,
@@ -365,17 +377,21 @@ def create_table_if_needed(conn):
 
 
 def _na_to_none(v):
-    """Map pandas NA/NaN to None so psycopg2 writes SQL NULL."""
+    """ Map pandas NA/NaN to None so psycopg2 writes SQL NULL.
+    """
     try:
         if v is None or pd.isna(v):
             return None
     except (TypeError, ValueError):
         pass
+    if isinstance(v, np.generic):
+        return v.item()
     return v
 
 
 def store_chunk(conn, df):
-    """Upsert one chunk's grid-cell rows into the ifs_met table, chunked."""
+    """ Upsert one chunk's grid-cell rows into the ifs_met table, chunked.
+    """
     if df.empty:
         conn.commit()
         print("  committed 0 rows")
@@ -427,7 +443,8 @@ def store_chunk(conn, df):
 
 
 def main():
-    """Run the IFS backfill for every city, resuming from the ledger."""
+    """ Run the IFS backfill for every city, resuming from the ledger.
+    """
     dsn = resolve_pg_dsn()
     done = load_ledger()
     print(f"Loaded {len(done)} completed (city, batch, chunk) entries from {LEDGER_PATH}.")
