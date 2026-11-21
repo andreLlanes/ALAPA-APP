@@ -1,10 +1,12 @@
 import { ChevronDown, LocateFixed, Minus, TrendingDown, TrendingUp } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { AQI, aqiValue, categoryOf } from '../data/aqi'
-import { HORIZON, MODELS, localHourAt, type Clock, type ForecastField, type ModelId } from '../data/forecast'
-import { cellCenter, metersBetween, type CellRef } from '../data/grid'
+import { HORIZON, localHourAt, type Clock, type ForecastField, type ModelId } from '../data/forecast'
+import { cellCenter, metersBetween, type CellRef, type LngLat } from '../data/grid'
 import { CITIES } from '../data/places'
-import { dayWord, fmtCoord, fmtHour, fmtPm } from '../lib/format'
+import { readingAt, type StationReadings } from '../data/readings'
+import { dayWord, fmtCoord, fmtGap, fmtHour, fmtPm } from '../lib/format'
+import { AreaCheck, StationCheck } from './Checks'
 import { Explain } from './Explain'
 import { OutlookChart } from './OutlookChart'
 
@@ -14,6 +16,8 @@ interface Props {
   field: ForecastField
   clock: Clock
   cell: CellRef | null
+  /** The station at the selected place, when there is one with readings. */
+  station: StationReadings | null
   placeName: string
   locStatus: LocStatus
   lead: number
@@ -22,6 +26,7 @@ interface Props {
   onModel: (m: ModelId) => void
   onLocate: () => void
   onCity: (id: string) => void
+  onStation: (id: string, at: LngLat) => void
 }
 
 const TREND = {
@@ -87,6 +92,7 @@ function NoPlace({ field, clock, lead, model, locStatus, onLocate, onCity, title
         ))}
       </ol>
       <p className="footnote">The 17 Metro Manila cities, by the average around each city center (µg/m³ PM2.5).</p>
+      {field.readings?.backtest && <AreaCheck field={field} model={model} />}
       <label className="field">
         <span className="field__label">Go to a city</span>
         <select className="select" defaultValue="" onChange={(e) => e.target.value && onCity(e.target.value)}>
@@ -109,10 +115,31 @@ function NoPlace({ field, clock, lead, model, locStatus, onLocate, onCity, title
   )
 }
 
-function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLead, onModel, onLocate, onCity }: Props & { cell: CellRef }) {
+function Bulletin(props: Props & { cell: CellRef }) {
+  const { field, clock, cell, station, placeName, locStatus, lead, model, onLead, onModel, onStation } = props
   const [open, setOpen] = useState(() => new URLSearchParams(window.location.search).has('details'))
   const series = useMemo(() => field.series(cell.index, model), [field, cell.index, model])
   const water = field.isWater(cell.index)
+  const readings = field.readings
+  const measured = useMemo(
+    () => (station && readings ? { values: station.pm25, lookback: readings.lookback } : null),
+    [station, readings],
+  )
+  // Away from a station there is nothing measured to compare; point to the nearest one.
+  const nearest = useMemo(() => {
+    if (!readings?.backtest || station) return null
+    const here = cellCenter(cell)
+    let best: StationReadings | null = null
+    let d = Infinity
+    for (const s of readings.stations) {
+      const dd = metersBetween(s.at, here)
+      if (dd < d) {
+        d = dd
+        best = s
+      }
+    }
+    return best ? { s: best, km: d / 1000 } : null
+  }, [readings, station, cell])
 
   const worst = useMemo((): [number, number] => {
     let peak = 0
@@ -150,8 +177,7 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
 
   if (water) {
     return (
-      <NoPlace field={field} clock={clock} cell={null} placeName="" locStatus="picked" lead={lead} model={model}
-        onLead={onLead} onModel={onModel} onLocate={onLocate} onCity={onCity}
+      <NoPlace {...props} cell={null} station={null} placeName="" locStatus="picked"
         title="That spot is water"
         lede="ALAPA estimates PM2.5 over land only. Tap a spot on land, or choose a city." />
     )
@@ -159,14 +185,19 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
 
   const v = series.v[lead]
   const cat = categoryOf(v)
-  const trend = TREND[field.trend(cell.index, lead, model)]
-  const TrendIcon = trend.icon
+  const obs = station && readings ? readingAt(readings, station, lead) : NaN
+  const trendKey = field.trend(cell.index, lead, model)
+  const trend = trendKey ? TREND[trendKey] : null
+  // A real map's range is the kriging part alone until the forecast error is added, too narrow
+  // to call likely; the details show it under its own name.
+  const { demo, calibratedRange } = field.provenance
+  const showRange = demo || calibratedRange
   const t = clock.issued + lead * 3_600_000
   const peakT = clock.issued + worst[0] * 3_600_000
   const peakEndT = clock.issued + (worst[1] + 1) * 3_600_000
   const peakCat = categoryOf(Math.max(...series.v.slice(worst[0], worst[1] + 1)))
   const dist = field.stationDistance[cell.index]
-  const conf = field.confidence(cell.index)
+  const conf = field.confidence(cell.index, model)
   const confWord = conf > 0.6 ? 'Higher' : conf > 0.3 ? 'Moderate' : 'Lower'
   const [lng, lat] = cellCenter(cell)
   const city = CITIES.find((c) => metersBetween(c.at, [lng, lat]) < 1500)
@@ -180,6 +211,12 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
           {locStatus === 'granted' && <LocateFixed size={20} aria-label="Your location" className="bulletin__here" />}
           {placeName}
         </h2>
+        {station && (
+          <p className="bulletin__station">
+            {station.name} · {station.reference ? 'reference-grade monitor' : 'low-cost sensor'} ·{' '}
+            {station.inMap ? 'used to make the map' : 'not used by the map'}
+          </p>
+        )}
       </header>
 
       <section className="level" aria-live="polite">
@@ -192,12 +229,28 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
             <span className="level__pm num">{fmtPm(v)}</span>
             <span className="level__unit">µg/m³ PM2.5</span>
           </p>
-          <p className="level__trend">
-            <TrendIcon size={16} aria-hidden /> {trend.text} <span className="muted">vs. 3 h earlier</span>
-          </p>
-          <p className="level__range">
-            Likely between <b className="num">{fmtPm(series.lo[lead])}</b> and <b className="num">{fmtPm(series.hi[lead])}</b>
-          </p>
+          {trend && (
+            <p className="level__trend">
+              <trend.icon size={16} aria-hidden /> {trend.text} <span className="muted">vs. 3 h earlier</span>
+            </p>
+          )}
+          {showRange && (
+            <p className="level__range">
+              Likely between <b className="num">{fmtPm(series.lo[lead])}</b> and <b className="num">{fmtPm(series.hi[lead])}</b>
+            </p>
+          )}
+          {measured && (
+            <p className="level__measured">
+              {Number.isFinite(obs) ? (
+                <>
+                  <span className="swatch" style={{ background: categoryOf(obs).color }} aria-hidden />
+                  Measured <b className="num">{fmtPm(obs)}</b> <span className="muted">· forecast {fmtGap(v - obs)}</span>
+                </>
+              ) : (
+                <span className="muted">No reading this hour</span>
+              )}
+            </p>
+          )}
         </div>
       </section>
 
@@ -233,8 +286,19 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
 
       <section>
         <h3 className="section-title">Hour by hour</h3>
-        <OutlookChart series={series} clock={clock} lead={lead} worst={worst} onLead={onLead} />
+        <OutlookChart series={series} clock={clock} lead={lead} worst={worst} onLead={onLead} measured={measured} />
+        {nearest && (
+          <p className="footnote">
+            Readings exist only where there is a station. The nearest, {nearest.s.name}, is{' '}
+            <span className="num">{nearest.km.toFixed(1)}</span> km away.{' '}
+            <button type="button" className="linkbtn" onClick={() => onStation(nearest.s.id, nearest.s.at)}>
+              Compare with its readings
+            </button>
+          </p>
+        )}
       </section>
+
+      {station && readings?.backtest && <StationCheck field={field} model={model} station={station} />}
 
       <section>
         <h3 className="section-title">Daily AQI</h3>
@@ -265,10 +329,14 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
           <div className="details__body">
             <dl className="facts">
               <div>
-                <dt>Likely range</dt>
+                <dt>{showRange ? 'Likely range' : 'Map uncertainty'}</dt>
                 <dd>
                   <span className="num">{fmtPm(series.lo[lead])}–{fmtPm(series.hi[lead])}</span> µg/m³
-                  <span className="muted"> · interval level to be set</span>
+                  <span className="muted">
+                    {showRange
+                      ? ' · interval level to be set'
+                      : " · 90% kriging range only; the forecast's own error is not included yet"}
+                  </span>
                 </dd>
               </div>
               <div>
@@ -294,15 +362,17 @@ function Bulletin({ field, clock, cell, placeName, locStatus, lead, model, onLea
 
             <fieldset className="models">
               <legend className="field__label">Forecast model</legend>
-              <div className="seg" role="radiogroup">
-                {MODELS.map((m) => (
-                  <label key={m.id} className="seg__opt" title={m.full}>
-                    <input type="radio" name="model" value={m.id} checked={model === m.id} onChange={() => onModel(m.id)} />
-                    <span>{m.name}</span>
-                  </label>
-                ))}
-              </div>
-              <p className="footnote">No model has been chosen as the best yet; evaluation results are pending.</p>
+              {field.models.length > 1 && (
+                <div className="seg" role="radiogroup">
+                  {field.models.map((m) => (
+                    <label key={m.id} className="seg__opt" title={m.full}>
+                      <input type="radio" name="model" value={m.id} checked={model === m.id} onChange={() => onModel(m.id)} />
+                      <span>{m.name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <p className="footnote">{field.modelNote(model)}</p>
             </fieldset>
 
             <Explain key={`${cell.index}-${lead}-${model}`} field={field} cell={cell} lead={lead} model={model} />

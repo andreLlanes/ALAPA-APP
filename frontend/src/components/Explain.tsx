@@ -1,6 +1,6 @@
 import { LoaderCircle } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import type { ForecastField, ModelId } from '../data/forecast'
+import type { Explanation, ForecastField, ModelId } from '../data/forecast'
 import type { CellRef } from '../data/grid'
 import { fmtPm } from '../lib/format'
 
@@ -11,7 +11,7 @@ interface Props {
   model: ModelId
 }
 
-type State = { kind: 'idle' } | { kind: 'loading' } | { kind: 'done'; data: ReturnType<ForecastField['explain']> }
+type State = { kind: 'idle' } | { kind: 'loading' } | { kind: 'done'; data: Explanation }
 
 /** SHAP attributions are computed on request, never precomputed for the grid. */
 export function Explain({ field, cell, lead, model }: Props) {
@@ -19,9 +19,21 @@ export function Explain({ field, cell, lead, model }: Props) {
 
   useEffect(() => {
     if (state.kind !== 'loading') return
-    const t = window.setTimeout(() => setState({ kind: 'done', data: field.explain(cell.index, lead, model) }), 900)
+    const t = window.setTimeout(() => {
+      const data = field.explain(cell.index, lead, model)
+      setState(data ? { kind: 'done', data } : { kind: 'idle' })
+    }, 900)
     return () => window.clearTimeout(t)
   }, [state.kind, field, cell.index, lead, model])
+
+  if (!field.canExplain) {
+    return (
+      <div className="explain">
+        <h4 className="field__label">What the model relied on</h4>
+        <p className="footnote">Explanations need the model service, which is not connected yet.</p>
+      </div>
+    )
+  }
 
   if (state.kind === 'idle') {
     return (

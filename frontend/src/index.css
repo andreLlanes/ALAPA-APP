@@ -15,6 +15,12 @@
   --ink-2: #394252;
   --ink-3: #566072;
 
+  /* Chart series (O2's error progression): fixed categorical order, checked with the dataviz
+     palette validator on --sheet. Slot 3 is under 3:1 on white, so every line is also labeled. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+
   --font: 'Archivo Variable', 'Archivo', system-ui, sans-serif;
 
   --r-sm: 3px;
@@ -120,7 +126,8 @@ a {
 
 .masthead {
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  /* The as-of note keeps a readable measure; the notice stacks so it never squeezes the note. */
+  grid-template-columns: auto auto minmax(15rem, 1fr) auto;
   align-items: center;
   gap: 8px 28px;
   padding: 10px 20px 10px 16px;
@@ -181,12 +188,18 @@ a {
 }
 
 .masthead__notice {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+  display: grid;
+  justify-items: end;
+  gap: 6px;
   font-size: 0.8rem;
   color: var(--bulletin-text);
   text-align: right;
+}
+
+.masthead__disclaimer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .masthead__demo {
@@ -216,6 +229,8 @@ a {
   position: relative;
   min-height: 0;
   background: var(--paper-sunk);
+  /* Its children are all positioned, so it can be a size container for the map key. */
+  container: map / size;
 }
 
 .stage__cone {
@@ -310,8 +325,59 @@ a {
   pointer-events: none;
 }
 
+/* The folded key's button: shown on phones and on any map too short for the open key. */
 .mapkey__toggle {
   display: none;
+  pointer-events: auto;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  padding: 6px 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-md);
+  background: var(--sheet);
+  box-shadow: var(--shadow-float);
+  font-size: 0.8rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.mapkey__toggle:hover {
+  background: var(--paper);
+}
+
+.mapkey__toggle:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+.mapkey__chips {
+  display: flex;
+  gap: 2px;
+}
+
+.mapkey__chips .swatch {
+  width: 8px;
+  height: 12px;
+}
+
+/* The open key is about 420 px of cards; a shorter map folds it behind the toggle, and opened
+   there it scrolls inside the map instead of spilling over the outlook below. */
+@container map (max-height: 440px) {
+  .mapkey__toggle {
+    display: inline-flex;
+  }
+
+  .mapkey[data-open='false'] .legend,
+  .mapkey[data-open='false'] .layers {
+    display: none;
+  }
+
+  .mapkey[data-open='true'] {
+    max-height: calc(100cqh - 44px);
+    overflow-y: auto;
+    pointer-events: auto;
+  }
 }
 
 .legend,
@@ -1190,6 +1256,431 @@ a {
   to { background-position: -200% 0; }
 }
 
+/* ------------------------------------------------------------------ readings */
+
+/* What a station measured is drawn in the chrome blue, apart from the black forecast and the AQI hues. */
+:root {
+  --measured: #1c4fa3;
+}
+
+.masthead__asof--past {
+  max-width: 52ch;
+  line-height: 1.3;
+}
+
+.masthead__asof--past svg {
+  flex: none;
+}
+
+.station-pop .maplibregl-popup-content {
+  padding: 7px 10px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-float);
+  font: 0.8rem/1.35 var(--font);
+  color: var(--ink);
+}
+
+.station-pop__name {
+  font-weight: 700;
+}
+
+.station-pop__val {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.station-pop__sub {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.bulletin__station {
+  margin-top: 4px;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.level__measured {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: end;
+  font-size: 0.84rem;
+  text-align: right;
+}
+
+.level__measured b {
+  color: var(--measured);
+}
+
+.outlook__measured {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 4px;
+  font-size: 0.8rem;
+}
+
+.outlook__measured b {
+  color: var(--measured);
+  font-weight: 720;
+}
+
+.outlook__past {
+  fill: rgb(255 255 255 / 0.55);
+}
+
+.outlook__reading path {
+  fill: none;
+  stroke: var(--measured);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+
+.outlook__reading circle {
+  fill: var(--measured);
+}
+
+.outlook__obs-dot {
+  fill: #fff;
+  stroke: var(--measured);
+  stroke-width: 2;
+}
+
+.outlook__legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.74rem;
+  color: var(--ink-3);
+}
+
+.outlook__key {
+  display: inline-block;
+  width: 16px;
+  height: 0;
+  border-top: 2px solid var(--ink);
+}
+
+.outlook__key--reading {
+  margin-left: 8px;
+  border-color: var(--measured);
+}
+
+.linkbtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  cursor: pointer;
+}
+
+.check__lede {
+  margin-bottom: 8px;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  max-width: 60ch;
+}
+
+.check__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.check__table th,
+.check__table td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--rule);
+  text-align: right;
+}
+
+.check__table thead th {
+  font-size: 0.74rem;
+  font-weight: 650;
+  color: var(--ink-3);
+  border-bottom-color: var(--rule-strong);
+}
+
+.check__table th[scope='row'] {
+  padding-left: 0;
+  font-weight: 600;
+  text-align: left;
+}
+
+/* ------------------------------------------------- O2's error progression */
+
+.masthead__btn {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--bulletin-text);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.76rem;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.masthead__btn:hover {
+  background: var(--bulletin-deep);
+}
+
+.masthead__btn:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+
+.tests {
+  width: min(780px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 18px 20px 16px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--sheet);
+  color: var(--ink);
+  box-shadow: var(--shadow-float);
+  overflow: auto;
+}
+
+.tests::backdrop {
+  background: rgb(8 37 85 / 0.45);
+}
+
+.tests__head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.tests__title {
+  font-size: 1.15rem;
+  font-weight: 750;
+  line-height: 1.2;
+}
+
+.tests__sub {
+  margin-top: 4px;
+  font-size: 0.84rem;
+  color: var(--ink-2);
+  max-width: 68ch;
+}
+
+.tests__close {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-sm);
+  background: var(--sheet);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.tests__close:hover {
+  background: var(--paper-sunk);
+}
+
+.tests__close:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+.tests__bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-top: 14px;
+}
+
+.tests__toggle {
+  font-size: 0.82rem;
+}
+
+.tests__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  color: var(--ink-2);
+}
+
+.tests__legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tests__key {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 2px solid var(--ink-3);
+}
+
+.tests__key--persistence {
+  border-top-style: dashed;
+}
+
+.tests__key--climatology {
+  border-top-style: dotted;
+}
+
+.tests__figure {
+  margin: 10px 0 0;
+}
+
+.tests__readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 14px;
+  min-height: 2.6em;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+}
+
+.tests__when {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.tests__val b {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.tests__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: crosshair;
+  touch-action: pan-y;
+}
+
+.tests__grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.tests__axis {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+}
+
+.tests__tick {
+  font-size: 10px;
+  font-weight: 550;
+  fill: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.tests__axis-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  fill: var(--ink-2);
+}
+
+.tests__line,
+.tests__base {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.tests__base {
+  stroke-width: 1.5;
+}
+
+.tests__dot {
+  fill: var(--sheet);
+  stroke-width: 2;
+}
+
+.tests__marker {
+  stroke: var(--bulletin);
+  stroke-width: 1.5;
+}
+
+.tests__hover {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+}
+
+.tests__end {
+  font-size: 10.5px;
+  font-weight: 600;
+  fill: var(--ink-2);
+}
+
+.tests__scroll {
+  max-height: 320px;
+  margin-top: 10px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+}
+
+.tests__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.tests__table th,
+.tests__table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--rule);
+  text-align: right;
+}
+
+.tests__table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--sheet);
+  font-size: 0.74rem;
+  font-weight: 650;
+  color: var(--ink-3);
+  border-bottom-color: var(--rule-strong);
+}
+
+.tests__table tr.is-viewed {
+  background: var(--paper-sunk);
+}
+
+.tests__note {
+  max-width: none;
+  margin-top: 12px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -1199,17 +1690,24 @@ a {
 
 /* ------------------------------------------------------------------ narrow */
 
-@media (max-width: 1180px) {
+/* Below this the masthead row cannot hold the issue, a readable as-of note and the notice, so the
+   notice takes its own row: the disclaimer on the left, the forecast-tests button on the right. */
+@media (max-width: 1260px) {
   .masthead {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto auto minmax(0, 1fr);
   }
 
   .masthead__notice {
     grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
     justify-content: space-between;
+    gap: 6px 16px;
     text-align: left;
   }
+}
 
+@media (max-width: 1180px) {
   .stage {
     grid-template-columns: minmax(0, 1fr) 380px;
   }
@@ -1364,29 +1862,7 @@ a {
   }
 
   .mapkey__toggle {
-    pointer-events: auto;
     display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    justify-self: start;
-    padding: 6px 10px;
-    border: 1px solid var(--rule-strong);
-    border-radius: var(--r-md);
-    background: var(--sheet);
-    box-shadow: var(--shadow-float);
-    font-size: 0.8rem;
-    font-weight: 650;
-    cursor: pointer;
-  }
-
-  .mapkey__chips {
-    display: flex;
-    gap: 2px;
-  }
-
-  .mapkey__chips .swatch {
-    width: 8px;
-    height: 12px;
   }
 
   .mapkey[data-open='false'] .legend,

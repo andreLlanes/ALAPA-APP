@@ -5,11 +5,13 @@ import { AQI } from '../data/aqi'
 interface Props {
   showStations: boolean
   showConfidence: boolean
+  /** The stations carry readings: dots show what was measured. */
+  readings: boolean
   onStations: (v: boolean) => void
   onConfidence: (v: boolean) => void
 }
 
-export function MapKey({ showStations, showConfidence, onStations, onConfidence }: Props) {
+export function MapKey({ showStations, showConfidence, readings, onStations, onConfidence }: Props) {
   const [open, setOpen] = useState(false)
   return (
     <div className="mapkey" data-open={open}>
@@ -50,10 +52,17 @@ export function MapKey({ showStations, showConfidence, onStations, onConfidence 
         <label className="toggle">
           <input type="checkbox" checked={showStations} onChange={(e) => onStations(e.target.checked)} />
           <RadioTower size={15} aria-hidden />
-          <span>
-            Monitoring stations
-            <span className="toggle__sub">Filled dot is reference-grade</span>
-          </span>
+          {readings ? (
+            <span>
+              Station readings
+              <span className="toggle__sub">Dot color is what the station measured this hour; a ring marks one the map never used</span>
+            </span>
+          ) : (
+            <span>
+              Monitoring stations
+              <span className="toggle__sub">Filled dot is reference-grade</span>
+            </span>
+          )}
         </label>
       </section>
     </div>

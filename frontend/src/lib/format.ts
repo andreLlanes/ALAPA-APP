@@ -26,9 +26,19 @@ export function fmtAgo(ms: number, now: number) {
   if (m < 1) return 'just now'
   if (m < 60) return `${m} min ago`
   const h = Math.floor(m / 60)
-  return `${h} h ${m % 60} min ago`
+  if (h < 48) return `${h} h ${m % 60} min ago`
+  return `${Math.floor(h / 24)} days ago`
 }
 
 export const fmtPm = (v: number) => (Number.isNaN(v) ? '–' : v < 10 ? v.toFixed(1) : Math.round(v).toString())
+
+/** A forecast-minus-reading gap in words: "5.2 higher", "3.1 lower", or "on target". */
+export function fmtGap(d: number) {
+  if (Math.abs(d) < 0.5) return 'on target'
+  return `${fmtPm(Math.abs(d))} ${d > 0 ? 'higher' : 'lower'}`
+}
+
+/** A signed µg/m³ difference: "+5.2", "−3.1". */
+export const fmtSigned = (d: number) => (Number.isNaN(d) ? '–' : `${d >= 0 ? '+' : '−'}${fmtPm(Math.abs(d))}`)
 
 export const fmtCoord = (lng: number, lat: number) => `${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E`

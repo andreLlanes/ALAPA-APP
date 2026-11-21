@@ -1,5 +1,5 @@
 import { AQI, AQI_RGB } from '../data/aqi'
-import type { ForecastField } from '../data/forecast'
+import type { ForecastField, ModelId } from '../data/forecast'
 import { CELL_COUNT, GRID } from '../data/grid'
 
 const FIELD_ALPHA = 168
@@ -31,10 +31,10 @@ export function paintField(values: Float32Array, canvas: HTMLCanvasElement) {
 }
 
 /**
- * Hatching where the spatialized surface is least certain. Dense lines far from
+ * Hatching where one model's spatialized surface is least certain. Dense lines far from
  * stations, sparse lines in between, nothing near the network.
  */
-export function paintConfidence(field: ForecastField, canvas: HTMLCanvasElement) {
+export function paintConfidence(field: ForecastField, model: ModelId, canvas: HTMLCanvasElement) {
   const S = 4
   canvas.width = GRID.cols * S
   canvas.height = GRID.rows * S
@@ -48,7 +48,7 @@ export function paintConfidence(field: ForecastField, canvas: HTMLCanvasElement)
     const img = mctx.createImageData(GRID.cols, GRID.rows)
     for (let i = 0; i < CELL_COUNT; i++) {
       if (field.isWater(i)) continue
-      const c = field.confidence(i)
+      const c = field.confidence(i, model)
       if (c >= min && c < max) img.data[i * 4 + 3] = 255
     }
     mctx.putImageData(img, 0, 0)

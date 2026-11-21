@@ -2,12 +2,14 @@ import {
   Map as MLMap,
   Marker,
   NavigationControl,
+  Popup,
   ScaleControl,
   setWorkerUrl,
   type GeoJSONSource,
   type ImageSource,
   type MapMouseEvent,
 } from 'maplibre-gl'
+import type { Feature, FeatureCollection } from 'geojson'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import { useEffect, useRef } from 'react'
@@ -15,6 +17,8 @@ import { categoryOf } from '../data/aqi'
 import type { ForecastField, ModelId } from '../data/forecast'
 import { CELL_COUNT, GRID_BOUNDS, GRID_CORNERS, cellAt, cellPolygon, type CellRef, type LngLat } from '../data/grid'
 import { CITIES } from '../data/places'
+import { readingAt } from '../data/readings'
+import { fmtPm } from '../lib/format'
 import { paintConfidence, paintField } from '../lib/paint'
 
 interface Props {
@@ -26,6 +30,63 @@ interface Props {
   selected: CellRef | null
   flyTo: { at: LngLat; zoom: number; key: number } | null
   onPick: (at: LngLat) => void
+  onStation: (id: string, at: LngLat) => void
+}
+
+/**
+ * Station dots for one hour. With readings, a dot is filled with the AQI color of what the
+ * station measured that hour (white when it has no reading) and carries the map's value at its
+ * cell for the hover readout; without, the filled dot marks a reference-grade monitor.
+ */
+function stationData(f: ForecastField, lead: number, model: ModelId): FeatureCollection {
+  const r = f.readings
+  const features: Feature[] = r
+    ? r.stations.map((s) => {
+        const measured = readingAt(r, s, lead)
+        const forecast = f.value(s.cell, lead, model)
+        const has = Number.isFinite(measured)
+        return {
+          type: 'Feature',
+          // Feature properties travel through the tiler: -1, not NaN, marks a missing number.
+          properties: {
+            id: s.id, name: s.name, reference: s.reference, inMap: s.inMap, has,
+            fill: has ? categoryOf(measured).color : '#ffffff',
+            measured: has ? measured : -1,
+            forecast: Number.isFinite(forecast) ? forecast : -1,
+          },
+          geometry: { type: 'Point', coordinates: s.at },
+        }
+      })
+    : f.stations.map((s) => ({
+        type: 'Feature',
+        properties: { id: s.id, name: s.name, reference: s.reference, inMap: true, has: true,
+                      fill: s.reference ? '#12161f' : '#ffffff', measured: -1, forecast: -1 },
+        geometry: { type: 'Point', coordinates: s.at },
+      }))
+  return { type: 'FeatureCollection', features }
+}
+
+/** Hover card for a station dot, built as DOM so no file content is read as HTML. */
+function stationCard(p: Record<string, unknown>, withReadings: boolean) {
+  const yes = (v: unknown) => v === true || v === 'true'
+  const el = document.createElement('div')
+  const line = (text: string, cls: string) => {
+    const d = document.createElement('div')
+    d.className = cls
+    d.textContent = text
+    el.appendChild(d)
+  }
+  line(String(p.name), 'station-pop__name')
+  if (withReadings) {
+    const measured = Number(p.measured)
+    const forecast = Number(p.forecast)
+    line(measured >= 0 ? `Measured ${fmtPm(measured)} µg/m³` : 'No reading this hour', 'station-pop__val')
+    if (forecast >= 0) line(`Map ${fmtPm(forecast)} µg/m³`, 'station-pop__sub')
+    line(yes(p.inMap) ? 'Used to make the map' : 'Not used by the map: an independent check', 'station-pop__sub')
+  } else if (yes(p.reference)) {
+    line('Reference-grade monitor', 'station-pop__sub')
+  }
+  return el
 }
 
 // Bundle MapLibre's worker ourselves; the build does not copy it otherwise.
@@ -35,7 +96,7 @@ setWorkerUrl(workerUrl)
 // labels, so the true coastline masks it and streets stay readable on top.
 const FIELD_OPACITY = 0.6
 
-export function MapView({ field, lead, model, showStations, showConfidence, selected, flyTo, onPick }: Props) {
+export function MapView({ field, lead, model, showStations, showConfidence, selected, flyTo, onPick, onStation }: Props) {
   const host = useRef<HTMLDivElement>(null)
   const mapRef = useRef<MLMap | null>(null)
   const ready = useRef(false)
@@ -43,11 +104,13 @@ export function MapView({ field, lead, model, showStations, showConfidence, sele
   const values = useRef(new Float32Array(CELL_COUNT))
   const badges = useRef(new Map<string, { el: HTMLDivElement; marker: Marker; priority: number }>())
   const pickRef = useRef(onPick)
+  const stationRef = useRef(onStation)
   const latest = useRef({ field, lead, model, showStations, showConfidence, selected })
 
   useEffect(() => {
     pickRef.current = onPick
-  }, [onPick])
+    stationRef.current = onStation
+  }, [onPick, onStation])
 
   useEffect(() => {
     latest.current = { field, lead, model, showStations, showConfidence, selected }
@@ -110,7 +173,7 @@ export function MapView({ field, lead, model, showStations, showConfidence, sele
 
       map.addSource('confidence', { type: 'image', coordinates: GRID_CORNERS })
       ;(map.getSource('confidence') as ImageSource).updateImage({
-        image: paintConfidence(f, document.createElement('canvas')),
+        image: paintConfidence(f, m, document.createElement('canvas')),
       })
       map.addLayer({
         id: 'confidence',
@@ -135,28 +198,48 @@ export function MapView({ field, lead, model, showStations, showConfidence, sele
         paint: { 'line-color': '#0b3171', 'line-width': 1.5, 'line-dasharray': [4, 3], 'line-opacity': 0.7 },
       }, underLabels)
 
-      map.addSource('stations', {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: f.stations.map((s) => ({
-            type: 'Feature',
-            properties: { name: s.name, reference: s.reference },
-            geometry: { type: 'Point', coordinates: s.at },
-          })),
+      map.addSource('stations', { type: 'geojson', data: stationData(f, l, m) })
+      const dotRadius = f.readings ? ([9, 3.5, 14, 7] as const) : ([9, 2.5, 14, 5.5] as const)
+      const stationsVisible = latest.current.showStations ? 'visible' : 'none'
+      // A ring around a dot marks a station the map never used.
+      map.addLayer({
+        id: 'stations-ring',
+        type: 'circle',
+        source: 'stations',
+        filter: ['==', ['get', 'inMap'], false],
+        layout: { visibility: stationsVisible },
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], dotRadius[0], dotRadius[1] + 3, dotRadius[2], dotRadius[3] + 3.5],
+          'circle-color': 'rgba(0,0,0,0)',
+          'circle-stroke-color': '#12161f',
+          'circle-stroke-width': 1.25,
         },
       })
       map.addLayer({
         id: 'stations',
         type: 'circle',
         source: 'stations',
-        layout: { visibility: latest.current.showStations ? 'visible' : 'none' },
+        layout: { visibility: stationsVisible },
         paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 9, 2.5, 14, 5.5],
-          'circle-color': ['case', ['get', 'reference'], '#12161f', '#ffffff'],
-          'circle-stroke-color': '#12161f',
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], ...dotRadius],
+          'circle-color': ['get', 'fill'],
+          'circle-stroke-color': ['case', ['==', ['get', 'has'], true], '#12161f', '#8a93a3'],
           'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 9, 1, 14, 1.75],
         },
+      })
+
+      const card = new Popup({ closeButton: false, closeOnClick: false, offset: 12, className: 'station-pop' })
+      map.on('mousemove', 'stations', (e) => {
+        const feat = e.features?.[0]
+        if (!feat || feat.geometry.type !== 'Point') return
+        map.getCanvas().style.cursor = 'pointer'
+        card.setLngLat(feat.geometry.coordinates as LngLat)
+          .setDOMContent(stationCard(feat.properties, !!latest.current.field.readings))
+          .addTo(map)
+      })
+      map.on('mouseleave', 'stations', () => {
+        map.getCanvas().style.cursor = ''
+        card.remove()
       })
 
       map.addSource('selected', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
@@ -190,7 +273,13 @@ export function MapView({ field, lead, model, showStations, showConfidence, sele
       layoutBadges()
     })
 
-    map.on('click', (e: MapMouseEvent) => pickRef.current([e.lngLat.lng, e.lngLat.lat]))
+    // A tap on a station dot picks that station; anywhere else picks the cell.
+    map.on('click', (e: MapMouseEvent) => {
+      const box: [[number, number], [number, number]] = [[e.point.x - 6, e.point.y - 6], [e.point.x + 6, e.point.y + 6]]
+      const hit = ready.current && latest.current.showStations ? map.queryRenderedFeatures(box, { layers: ['stations'] })[0] : undefined
+      if (hit && hit.geometry.type === 'Point') stationRef.current(String(hit.properties.id), hit.geometry.coordinates as LngLat)
+      else pickRef.current([e.lngLat.lng, e.lngLat.lat])
+    })
     map.on('moveend', layoutBadges)
     map.on('zoom', layoutBadges)
 
@@ -267,13 +356,23 @@ export function MapView({ field, lead, model, showStations, showConfidence, sele
     map.setPaintProperty(`field-${next}`, 'raster-opacity', FIELD_OPACITY)
     map.setPaintProperty(`field-${front.current}`, 'raster-opacity', 0)
     front.current = next
+    ;(map.getSource('stations') as GeoJSONSource).setData(stationData(field, lead, model))
     helpers()?.updateBadges()
   }, [field, lead, model])
+
+  // Each model's kriging variance has its own shape, so the hatching follows the model.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !ready.current) return
+    ;(map.getSource('confidence') as ImageSource).updateImage({
+      image: paintConfidence(field, model, document.createElement('canvas')),
+    })
+  }, [field, model])
 
   useEffect(() => {
     const map = mapRef.current
     if (!map || !ready.current) return
-    map.setLayoutProperty('stations', 'visibility', showStations ? 'visible' : 'none')
+    for (const id of ['stations', 'stations-ring']) map.setLayoutProperty(id, 'visibility', showStations ? 'visible' : 'none')
   }, [showStations])
 
   useEffect(() => {

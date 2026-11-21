@@ -20,6 +20,7 @@ O1/venv/
 # Pipeline outputs (large; regenerable)
 Outputs/
 **/Outputs/
+O2/artifacts/
 
 # Progress ledgers & provenance (run artifacts)
 *_progress.txt
@@ -38,3 +39,4 @@ upload_manifest.txt
 Thumbs.db
 .idea/
 .vscode/
+O3/artifacts/

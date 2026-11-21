@@ -94,9 +94,15 @@ def logged(name: str, args=None):
 def environment() -> dict:
     """ Return the software versions behind a run, for reproducibility.
     """
-    import numpy
-    import torch
-    import xgboost
-    return {"python": platform.python_version(), "numpy": numpy.__version__,
-            "pandas": pd.__version__, "torch": torch.__version__,
-            "xgboost": xgboost.__version__, "cuda available": torch.cuda.is_available()}
+    import importlib
+    versions = {"python": platform.python_version(), "pandas": pd.__version__}
+    # A missing package is recorded, not fatal: a script that needs neither torch nor xgboost still runs.
+    for name in ("numpy", "scipy", "torch", "xgboost"):
+        try:
+            versions[name] = importlib.import_module(name).__version__
+        except ImportError:
+            versions[name] = "not installed"
+    if versions["torch"] != "not installed":
+        import torch
+        versions["cuda available"] = torch.cuda.is_available()
+    return versions
