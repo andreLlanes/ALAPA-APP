@@ -106,8 +106,6 @@ export interface Station {
   reference: boolean
 }
 
-export type Trend = 'rising' | 'easing' | 'steady'
-
 export interface Explanation {
   baseline: number
   value: number
@@ -125,7 +123,7 @@ export interface Provenance {
 
 /**
  * A forecast field. Subclasses supply the values, ranges and map confidence; everything the
- * panels derive from them (hour maps, series, trends, area means, the metro-wide shares and
+ * panels derive from them (hour maps, series, area means, the metro-wide shares and
  * the outlook cone) is computed here, the same way for real and demo data.
  */
 export abstract class ForecastField {
@@ -199,15 +197,6 @@ export abstract class ForecastField {
       hi[h] = v[h] + w
     }
     return { v, lo, hi }
-  }
-
-  /** Change against three hours earlier; null when there is no value three hours earlier. */
-  trend(i: number, lead: number, model: ModelId): Trend | null {
-    const now = this.value(i, lead, model)
-    const before = this.value(i, lead - 3, model)
-    if (!Number.isFinite(now) || !Number.isFinite(before) || before <= 0) return null
-    const r = (now - before) / before
-    return r > 0.08 ? 'rising' : r < -0.08 ? 'easing' : 'steady'
   }
 
   /** Share of Metro land in each AQI category, per hour: [hour * 6 + category]. */

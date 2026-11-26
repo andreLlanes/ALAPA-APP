@@ -278,7 +278,8 @@ export function O2Tests({ data, model, lead, onClose }: Props) {
       <p className="footnote tests__note">
         RMSE is the typical miss at the stations in µg/m³, so lower is better. These are O2&rsquo;s tests of the station
         forecasts (split {data.settings.split}, stations at least {data.settings.completeness}% complete). The map comes from
-        O3&rsquo;s models, trained and tested separately; its check is under &ldquo;How this past forecast did&rdquo;. The two use
+        O3&rsquo;s Manila-only models, trained and tested separately; its check is the &ldquo;All 72 h&rdquo; table in the
+        coverage-area panel. The two use
         different splits and stations, so their numbers are not comparable.
       </p>
     </dialog>

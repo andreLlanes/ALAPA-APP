@@ -17,7 +17,7 @@ const PAD_X = 16
 
 /**
  * The Metro outlook cone: each hour's column shows the share of Metro Manila in
- * each AQI category, inside an envelope that widens as forecast uncertainty grows.
+ * each AQI category, inside an envelope that is taller where the map's range is wider.
  * The whole strip is the hour slider.
  */
 export function ForecastCone({ share, spread, clock, lead, onLead }: Props) {
@@ -37,8 +37,9 @@ export function ForecastCone({ share, spread, clock, lead, onLead }: Props) {
     const inner = width - PAD_X * 2
     const col = inner / HORIZON
     const mid = (H - AXIS) / 2 + 2
-    // The envelope reports the forecast's own uncertainty: each hour's half-height
-    // is its median interval half-width, scaled so the widest hour fills the band.
+    // Each hour's half-height is its median range half-width across the area, scaled so the
+    // widest hour fills the band. On the exported maps that range is kriging's only (how unsure
+    // the map is between stations), not the forecast's own error.
     const narrow = (H - AXIS) * 0.2
     const wide = (H - AXIS) / 2 - 4
     let lo = Infinity
@@ -112,10 +113,28 @@ export function ForecastCone({ share, spread, clock, lead, onLead }: Props) {
         <h2 className="cone__title">
           Area outlook<span className="cone__title-long">, next 72 hours</span>
         </h2>
-        <p className="cone__note">
-          Share of the coverage area at each level. The band is tallest where the
-          forecast range is widest.
-        </p>
+        <dl className="cone__note cone__legend">
+          <div>
+            <dt>
+              <span className="cone__key cone__key--colour" aria-hidden>
+                {AQI.map((c) => (
+                  <i key={c.key} style={{ background: c.color }} />
+                ))}
+              </span>
+              Colour
+            </dt>
+            <dd>share of the coverage area at each level</dd>
+          </div>
+          <div>
+            <dt>
+              <svg className="cone__key" viewBox="0 0 30 14" aria-hidden>
+                <path d="M1 5 C8 6 10 1 16 1 S24 4 29 3 L29 11 C24 10 22 13 16 13 S8 8 1 9 Z" />
+              </svg>
+              Height
+            </dt>
+            <dd>how unsure the map is between stations (kriging range, not forecast error)</dd>
+          </div>
+        </dl>
         <nav className="cone__days" aria-label="Jump to a day's worst hour">
           {geo.days
             .filter((d) => d.end - d.start >= 3)

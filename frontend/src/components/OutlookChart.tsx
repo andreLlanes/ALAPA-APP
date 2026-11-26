@@ -11,6 +11,8 @@ interface Props {
   onLead: (lead: number) => void
   /** A station's readings, hour k = lead k - lookback (NaN for none), when this place is a station. */
   measured?: { values: Float32Array; lookback: number } | null
+  /** Whether the shaded band is a calibrated likely range (demo data) or kriging's range alone. */
+  likelyRange: boolean
 }
 
 const W = 360
@@ -19,7 +21,7 @@ const PAD = { l: 30, r: 8, t: 20, b: 26 }
 /** Hours of readings shown before the bulletin hour. The model saw 72; a day keeps the forecast legible. */
 const PAST_H = 24
 
-export function OutlookChart({ series, clock, lead, worst, onLead, measured }: Props) {
+export function OutlookChart({ series, clock, lead, worst, onLead, measured, likelyRange }: Props) {
   const [hover, setHover] = useState<number | null>(null)
   const past = measured ? Math.min(PAST_H, measured.lookback) : 0
 
@@ -79,8 +81,11 @@ export function OutlookChart({ series, clock, lead, worst, onLead, measured }: P
           <span className="outlook__val">
             <span className="swatch" style={{ background: cat.color }} aria-hidden />
             <b className="num">{fmtPm(series.v[shown])}</b> µg/m³
-            <span className="outlook__range num">
-              {fmtPm(series.lo[shown])}–{fmtPm(series.hi[shown])}
+            <span className="outlook__range">
+              {likelyRange ? 'likely ' : 'map range '}
+              <span className="num">
+                {fmtPm(series.lo[shown])}–{fmtPm(series.hi[shown])}
+              </span>
             </span>
           </span>
         ) : (
@@ -108,7 +113,7 @@ export function OutlookChart({ series, clock, lead, worst, onLead, measured }: P
         viewBox={`0 0 ${W} ${H}`}
         className="outlook__svg"
         role="img"
-        aria-label={`Hourly PM2.5 outlook for the next 72 hours with the range shaded${measured ? `, and the readings measured at this station, from ${past} hours before` : ''}`}
+        aria-label={`Hourly PM2.5 outlook for the next 72 hours with the ${likelyRange ? 'likely range' : "map's kriging uncertainty"} shaded${measured ? `, and the readings measured at this station, from ${past} hours before` : ''}`}
         onPointerMove={(e) => {
           const l = pointerToLead(e)
           setHover(l >= -past && l < HORIZON ? l : null)
@@ -192,12 +197,20 @@ export function OutlookChart({ series, clock, lead, worst, onLead, measured }: P
           <line x1={x(hover)} x2={x(hover)} y1={PAD.t} y2={H - PAD.b} className="outlook__hover" />
         )}
       </svg>
-      {measured && (
-        <p className="outlook__legend" aria-hidden>
-          <span className="outlook__key outlook__key--forecast" /> Forecast
-          <span className="outlook__key outlook__key--reading" /> Measured at this station
-        </p>
-      )}
+      <p className="outlook__legend">
+        <span>
+          <span className="outlook__key" aria-hidden /> Forecast
+        </span>
+        {measured && (
+          <span>
+            <span className="outlook__key outlook__key--reading" aria-hidden /> Measured at this station
+          </span>
+        )}
+        <span>
+          <span className="outlook__key outlook__key--band" aria-hidden />{' '}
+          {likelyRange ? 'Likely range' : 'Map uncertainty (kriging), not forecast error'}
+        </span>
+      </p>
     </figure>
   )
 }

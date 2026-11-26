@@ -1,4 +1,4 @@
-import { ChevronDown, LocateFixed, Minus, TrendingDown, TrendingUp } from 'lucide-react'
+import { ChevronDown, LocateFixed } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { AQI, aqiValue, categoryOf } from '../data/aqi'
 import { HORIZON, localHourAt, type Clock, type ForecastField, type ModelId } from '../data/forecast'
@@ -27,12 +27,6 @@ interface Props {
   onLocate: () => void
   onCity: (id: string) => void
   onStation: (id: string, at: LngLat) => void
-}
-
-const TREND = {
-  rising: { icon: TrendingUp, text: 'Rising' },
-  easing: { icon: TrendingDown, text: 'Easing' },
-  steady: { icon: Minus, text: 'Steady' },
 }
 
 export function BulletinPanel(props: Props) {
@@ -186,8 +180,6 @@ function Bulletin(props: Props & { cell: CellRef }) {
   const v = series.v[lead]
   const cat = categoryOf(v)
   const obs = station && readings ? readingAt(readings, station, lead) : NaN
-  const trendKey = field.trend(cell.index, lead, model)
-  const trend = trendKey ? TREND[trendKey] : null
   // A real map's range is the kriging part alone until the forecast error is added, too narrow
   // to call likely; the details show it under its own name.
   const { demo, calibratedRange } = field.provenance
@@ -229,11 +221,6 @@ function Bulletin(props: Props & { cell: CellRef }) {
             <span className="level__pm num">{fmtPm(v)}</span>
             <span className="level__unit">µg/m³ PM2.5</span>
           </p>
-          {trend && (
-            <p className="level__trend">
-              <trend.icon size={16} aria-hidden /> {trend.text} <span className="muted">vs. 3 h earlier</span>
-            </p>
-          )}
           {showRange && (
             <p className="level__range">
               Likely between <b className="num">{fmtPm(series.lo[lead])}</b> and <b className="num">{fmtPm(series.hi[lead])}</b>
@@ -286,7 +273,7 @@ function Bulletin(props: Props & { cell: CellRef }) {
 
       <section>
         <h3 className="section-title">Hour by hour</h3>
-        <OutlookChart series={series} clock={clock} lead={lead} worst={worst} onLead={onLead} measured={measured} />
+        <OutlookChart series={series} clock={clock} lead={lead} worst={worst} onLead={onLead} measured={measured} likelyRange={showRange} />
         {nearest && (
           <p className="footnote">
             Readings exist only where there is a station. The nearest, {nearest.s.name}, is{' '}

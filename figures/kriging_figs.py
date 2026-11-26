@@ -1,6 +1,6 @@
 """ Figures for the regression-kriging slide (Chapter 4), from the web app's map data
     (frontend/public/data, made by O3/spatial/export.py from `train.py --map true` runs), the
-    LSTM's map (shared.FIGURE_MODEL):
+    app's default map (shared.FIGURE_MODEL):
       kriging_map.png        the kriged PM2.5 forecast on the 100 m grid and its kriging uncertainty,
                              for one forecast hour, with the stations whose forecasts were kriged
       kriging_variogram.png  the variogram fitted for that run, with the distances between those
@@ -20,7 +20,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from pyproj import Transformer
 
 import shared
-from shared import INK, INK2, MUTED, GRID
+from shared import INK, INK2, MUTED, GRID, PLANE
 from data.batch import station_distances_km
 from spatial.variogram import Variogram
 
@@ -30,6 +30,7 @@ args = parser.parse_args()
 
 shared.use_style(11)
 manifest, layer = shared.web_map()
+name = shared.MODEL_NAMES.get(layer["id"], layer["id"])
 g = manifest["grid"]
 shape = (manifest["horizon"], g["rows"], g["cols"])
 
@@ -102,8 +103,16 @@ ax.plot(lag[1:], model(lag[1:]), color=INK, lw=2)
 ax.plot([0], [0], "o", color=INK, ms=4)
 ax.axhline(sill, color=GRID, lw=1, ls="--", zorder=0)
 ax.axvline(practical, color=GRID, lw=1, ls="--", zorder=0)
+# Past the farthest pair of stations the curve is the fitted model, not backed by any station pair.
+if practical > pairs.max():
+    for a in (ax, rx):
+        a.axvspan(pairs.max(), far, color=PLANE, lw=0, zorder=-1)
+    ax.text((pairs.max() + far) / 2, sill * 0.62, "farther apart than\nany two stations", ha="center",
+            fontsize=8.5, color=MUTED, linespacing=1.3)
 ax.text(far, sill * 1.02, f"sill {sill:.2f}", ha="right", va="bottom", fontsize=8.5, color=INK2)
-ax.text(practical + far * 0.01, sill * 0.35, f"practical range\n{practical:.1f} km", fontsize=8.5, color=INK2)
+right = practical > far * 0.8  # label on the line's left when it sits near the edge
+ax.text(practical + (-1 if right else 1) * far * 0.01, sill * 0.35, f"practical range\n{practical:.1f} km",
+        ha="right" if right else "left", fontsize=8.5, color=INK2)
 ax.annotate(f"nugget {v['nugget']:.2f}", (0, v["nugget"]), (far * 0.06, sill * 0.12), fontsize=8.5, color=INK2,
             arrowprops=dict(arrowstyle="-", color=INK2, lw=0.8))
 ax.set_ylim(0, sill * 1.18)
@@ -119,7 +128,8 @@ rx.set_ylim(-0.5, 1.2)
 rx.set_xlim(0, far)
 rx.set_xlabel("Distance between two stations (km)", fontsize=9)
 rx.tick_params(labelsize=8.5)
-fig.text(0.11, 0.965, f"Fitted residual variogram ({v['model']})", fontsize=11.5, weight="semibold", va="top")
+fig.text(0.11, 0.965, f"Fitted residual variogram, {name} map ({v['model']})", fontsize=11.5, weight="semibold",
+         va="top")
 fig.savefig(shared.out_path("kriging_variogram.png"), dpi=200)
 plt.close(fig)
 print(f"lead +{args.lead} h ({at(shown)}): PM2.5 {np.nanmin(pm):.1f}-{np.nanmax(pm):.1f}, SD {np.nanmin(sd):.2f}-"

@@ -1,5 +1,6 @@
 """ Figure for the M4 overview slide (Chapter 5), from the web app's map data (frontend/public/data,
-    made by O3/spatial/export.py from O3's LSTM run, `train.py --map true`):
+    made by O3/spatial/export.py from O3's `train.py --map true` runs), the app's default map
+    (shared.FIGURE_MODEL):
       m4_surfaces.png  the regression-kriged 100 m PM2.5 surface for Metro Manila at the start of the
                        forecast and the same morning hour on each of the next three days
     The map is a past forecast from O3's test period (a backtest) that used recorded weather. The
@@ -24,7 +25,8 @@ from shared import AXIS, INK, INK2, MUTED
 LEADS = (1, 24, 48, 72)  # the first forecast hour, then the same hour on each following day
 PM_CMAP = LinearSegmentedColormap.from_list("pm", ["#f3edf7", "#c7b2dd", "#8f6bbd", "#5e3c99", "#36195e"])
 
-manifest, layer = shared.web_map()  # the LSTM's map
+manifest, layer = shared.web_map()
+name = shared.MODEL_NAMES.get(layer["id"], layer["id"])
 readings = json.loads((shared.WEB_DATA / "readings.json").read_text())
 g = manifest["grid"]
 with gzip.open(shared.WEB_DATA / layer["pm25"]["file"]) as f:
@@ -99,9 +101,9 @@ cb.ax.tick_params(labelsize=8.5, length=2)
 cb.set_label("PM2.5 (µg/m³)", fontsize=9, color=INK2)
 fig.text(LEFT / FW, 1 - 0.14 / FH, "Forecast PM2.5 surfaces at 100 m, Metro Manila", fontsize=12,
          weight="semibold", va="top")
-fig.text(LEFT / FW, 0.1 / FH, f"Past forecast made {at(origin)} 2026 (test period) with recorded weather. The LSTM's "
+fig.text(LEFT / FW, 0.1 / FH, f"Past forecast made {at(origin)} 2026 (test period) with recorded weather. The {name}'s "
          f"forecasts at the {len(stations)} stations (dots),\naveraged over {len(layer['seeds'])} seeds, "
          "regression-kriged to every 100 m cell.", fontsize=8.5, color=MUTED, va="bottom", linespacing=1.4)
 fig.savefig(shared.out_path("m4_surfaces.png"), dpi=200)
 plt.close(fig)
-print(f"colour scale {lo:.1f}-{hi:.1f} µg/m³; saved to {shared.OUT}")
+print(f"{name} map; colour scale {lo:.1f}-{hi:.1f} µg/m³; saved to {shared.OUT}")

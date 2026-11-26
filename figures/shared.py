@@ -63,7 +63,10 @@ def out_path(name: str) -> Path:
 
 
 # The slide maps (kriging, M4) show this model's map; the app holds one per model since export v2.
-FIGURE_MODEL = "lstm"
+# None follows the app's default map (the manifest's default_model, picked by leave-one-station-out
+# RMSE in O3/spatial/export.py), so the slides show the map the app opens on.
+FIGURE_MODEL = None
+MODEL_NAMES = {"lstm": "LSTM", "gnn": "GNN", "gbt": "GBT"}
 
 
 def web_map(model=FIGURE_MODEL):

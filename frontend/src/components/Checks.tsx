@@ -21,15 +21,11 @@ export function AreaCheck({ field, model }: { field: ForecastField; model: Model
   if (!rows.length) return null
 
   return (
-    <section className="check" aria-label="How this past forecast did">
-      <h3 className="section-title">How this past forecast did</h3>
-      <p className="check__lede">
-        The forecast at each station's 100 m cell against what the station measured, over the 72 hours.
-      </p>
+    <section className="check" aria-label="Forecast against station readings, all 72 hours">
       <table className="check__table">
         <thead>
           <tr>
-            <th scope="col" />
+            <th scope="col" className="check__span">All 72 h</th>
             <th scope="col">Stations</th>
             <th scope="col" title="Root-mean-square error, µg/m³">RMSE</th>
             <th scope="col" title="Mean of forecast minus reading, µg/m³">Bias</th>
@@ -49,9 +45,9 @@ export function AreaCheck({ field, model }: { field: ForecastField; model: Model
         </tbody>
       </table>
       <p className="footnote">
-        RMSE is the typical miss in µg/m³; bias is forecast minus reading on average. The map stays close to the
-        forecasts it was made from, so the first row mostly tests the forecast and the second also tests the gaps
-        between stations. Levels are hourly here; the DENR AQI uses 24-hour means.
+        RMSE is the typical miss in µg/m³; bias is forecast minus reading on average. The first row checks the map
+        at the stations it was made from; the second checks it at stations it did not use, in the gaps between
+        them. Levels are hourly here; the DENR AQI uses 24-hour means.
       </p>
     </section>
   )
@@ -99,7 +95,7 @@ export function StationCheck({ field, model, station }: { field: ForecastField; 
           </dl>
           <p className="footnote">
             {station.inMap
-              ? "This station's own forecast went into the map, so this mostly tests the forecast."
+              ? "This station's forecast went into the map, so this checks the map at one of its own inputs."
               : 'The map never used this station, so this also tests how well the map fills the gaps between stations.'}
           </p>
         </>

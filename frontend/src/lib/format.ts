@@ -4,12 +4,14 @@ const timeFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, hour: 'numeric'
 const hourFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, hour: 'numeric' })
 const dayFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, weekday: 'short' })
 const dateFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, weekday: 'short', day: 'numeric', month: 'short' })
-const longFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })
+const yearFmt = new Intl.DateTimeFormat('en-PH', { timeZone: TZ, year: 'numeric' })
+const longFmt =new Intl.DateTimeFormat('en-PH', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' })
 
 export const fmtTime = (ms: number) => timeFmt.format(ms)
 export const fmtHour = (ms: number) => hourFmt.format(ms).replace(' ', '').toLowerCase()
 export const fmtDay = (ms: number) => dayFmt.format(ms)
 export const fmtDate = (ms: number) => dateFmt.format(ms)
+export const fmtYear = (ms: number) => yearFmt.format(ms)
 export const fmtLongDate = (ms: number) => longFmt.format(ms)
 
 /** "Today", "Tomorrow", or the weekday, relative to `ref`. */
